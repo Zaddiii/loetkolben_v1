@@ -1,0 +1,32 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build Test CM7",
+            "type": "shell",
+            "command": "cube-cmake --preset Debug; cube-cmake --build --preset Debug",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "Build Loetkolben CM7",
+            "type": "shell",
+            "command": "cube-cmake --preset Debug-Iron; cube-cmake --build --preset Debug-Iron",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            },
+            "group": "build"
+        }
+    ]
+}

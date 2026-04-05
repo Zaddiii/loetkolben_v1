@@ -14,14 +14,32 @@
             "name": "Debug",
             "inherits": "default",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug"
+                "CMAKE_BUILD_TYPE": "Debug",
+                "FIRMWARE_VARIANT": "TEST"
+            }
+        },
+        {
+            "name": "Debug-Iron",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "FIRMWARE_VARIANT": "IRON"
             }
         },
         {
             "name": "Release",
             "inherits": "default",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release"
+                "CMAKE_BUILD_TYPE": "Release",
+                "FIRMWARE_VARIANT": "TEST"
+            }
+        },
+        {
+            "name": "Release-Iron",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "FIRMWARE_VARIANT": "IRON"
             }
         }
     ],
@@ -31,8 +49,16 @@
             "configurePreset": "Debug"
         },
         {
+            "name": "Debug-Iron",
+            "configurePreset": "Debug-Iron"
+        },
+        {
             "name": "Release",
             "configurePreset": "Release"
+        },
+        {
+            "name": "Release-Iron",
+            "configurePreset": "Release-Iron"
         }
     ]
 }

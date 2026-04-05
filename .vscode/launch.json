@@ -1,15 +1,33 @@
 {
     "configurations": [
         {
-            "name": "my_first_debug_configuration",
+            "name": "Test CM7",
             "type": "stlinkgdbtarget",
             "request": "launch",
             "cwd": "${workspaceFolder}",
-            "preBuild": "${command:st-stm32-ide-debug-launch.build}",
+            "preLaunchTask": "Build Test CM7",
+            "deviceName": "STM32H755ZIT6",
+            "deviceCore": "Cortex-M7",
             "runEntry": "main",
             "imagesAndSymbols": [
                 {
                     "imageFileName": "${workspaceFolder}/CM7/build/nucleotest_CM7.elf"
+                }
+            ],
+            "verbose": false
+        },
+        {
+            "name": "Loetkolben CM7",
+            "type": "stlinkgdbtarget",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "Build Loetkolben CM7",
+            "deviceName": "STM32H755ZIT6",
+            "deviceCore": "Cortex-M7",
+            "runEntry": "main",
+            "imagesAndSymbols": [
+                {
+                    "imageFileName": "${workspaceFolder}/iron_cm7/build/nucleotest_iron_CM7.elf"
                 }
             ],
             "verbose": false

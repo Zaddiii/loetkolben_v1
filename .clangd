@@ -27,3 +27,19 @@ Diagnostics:
   - typename_requires_specqual
 If:
   PathMatch: CM7/.*
+
+---
+
+CompileFlags:
+  Add:
+  - '-ferror-limit=0'
+  - '-Wno-implicit-int'
+  CompilationDatabase: iron_cm7/build
+Diagnostics:
+  Suppress:
+  - unused-includes
+  - unknown_typename
+  - unknown_typename_suggest
+  - typename_requires_specqual
+If:
+  PathMatch: iron_cm7/.*

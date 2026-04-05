@@ -7,6 +7,10 @@
         {
             "name": "STM32_CM7",
             "compileCommands": "${workspaceFolder}/CM7/build/compile_commands.json"
+        },
+        {
+            "name": "STM32_iron_cm7",
+            "compileCommands": "${workspaceFolder}/iron_cm7/build/compile_commands.json"
         }
     ],
     "version": 4
