@@ -172,8 +172,15 @@ int main(void)
   uint32_t counter = 0;
   while (1)
   {
-    HAL_Delay(1000); // Warte 1 Sekunde
-    printf("Counter: %lu\r\n", counter++);
+    HAL_Delay(150); // Warte 150 ms
+    if (counter % 10 == 0) // Alle 10 Iterationen
+    {
+      printf("Counter: %lu\r\n", counter++);
+    }
+    else 
+    {
+      counter++;
+    }
     /* -- Sample board code for User push-button in interrupt mode ---- */
     if (BspButtonState == BUTTON_PRESSED)
     {
@@ -183,7 +190,7 @@ int main(void)
       BSP_LED_Toggle(LED_GREEN);
       BSP_LED_Toggle(LED_YELLOW);
       BSP_LED_Toggle(LED_RED);
-      printf("Button gedrueckt! LEDs getoggelt.\r\n");
+      printf("LEDs getoggelt.\r\n");
     }
     /* USER CODE END WHILE */
 
@@ -256,6 +263,7 @@ void BSP_PB_Callback(Button_TypeDef Button)
   if (Button == BUTTON_USER)
   {
     BspButtonState = BUTTON_PRESSED;
+    printf("Button gedrueckt!\r\n");
   }
 }
 
