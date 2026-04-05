@@ -32,6 +32,9 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+ #define INPUT_PC11_PIN GPIO_PIN_11
+ #define INPUT_PC11_GPIO_PORT GPIOC
+
 /* DUAL_CORE_BOOT_SYNC_SEQUENCE: Define for dual core boot synchronization    */
 /*                             demonstration code based on hardware semaphore */
 /* This define is present in both CM7/CM4 projects                            */
@@ -58,16 +61,36 @@ __IO uint32_t BspButtonState = BUTTON_RELEASED;
 
 /* USER CODE BEGIN PV */
 
+volatile uint8_t InputPc11EventPending = 0;
+volatile GPIO_PinState InputPc11Level = GPIO_PIN_RESET;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 
+static void InputPc11_Init(void);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+static void InputPc11_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+
+  GPIO_InitStruct.Pin = INPUT_PC11_PIN;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(INPUT_PC11_GPIO_PORT, &GPIO_InitStruct);
+
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+}
 
 /* USER CODE END 0 */
 
@@ -136,6 +159,8 @@ int main(void)
   /* Initialize all configured peripherals */
   /* USER CODE BEGIN 2 */
 
+  InputPc11_Init();
+
   /* USER CODE END 2 */
 
   /* Initialize leds */
@@ -161,6 +186,7 @@ int main(void)
   /* -- Sample board code to send message over COM1 port ---- */
   printf("STM32 Nucleo-H755ZI gestartet!\r\n");
   printf("LEDs leuchten, Button-Test bereit.\r\n");
+  printf("PC11 EXTI fuer beide Flanken aktiviert.\r\n");
   /* -- Sample board code to switch on leds ---- */
   BSP_LED_On(LED_GREEN);
   BSP_LED_On(LED_YELLOW);
@@ -169,18 +195,10 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  uint32_t counter = 0;
   while (1)
   {
     HAL_Delay(150); // Warte 150 ms
-    if (counter % 10 == 0) // Alle 10 Iterationen
-    {
-      printf("Counter: %lu\r\n", counter++);
-    }
-    else 
-    {
-      counter++;
-    }
+    
     /* -- Sample board code for User push-button in interrupt mode ---- */
     if (BspButtonState == BUTTON_PRESSED)
     {
@@ -191,6 +209,20 @@ int main(void)
       BSP_LED_Toggle(LED_YELLOW);
       BSP_LED_Toggle(LED_RED);
       printf("LEDs getoggelt.\r\n");
+    }
+
+    if (InputPc11EventPending != 0U)
+    {
+      InputPc11EventPending = 0;
+
+      if (InputPc11Level == GPIO_PIN_SET)
+      {
+        printf("PC11: LOW -> HIGH\r\n");
+      }
+      else
+      {
+        printf("PC11: HIGH -> LOW\r\n");
+      }
     }
     /* USER CODE END WHILE */
 
@@ -250,6 +282,15 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == INPUT_PC11_PIN)
+  {
+    InputPc11Level = HAL_GPIO_ReadPin(INPUT_PC11_GPIO_PORT, INPUT_PC11_PIN);
+    InputPc11EventPending = 1;
+  }
+}
 
 /* USER CODE END 4 */
 
