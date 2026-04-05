@@ -1,5 +1,6 @@
 #include "app.h"
 
+#include "calibration.h"
 #include "heater.h"
 #include "main.h"
 
@@ -33,17 +34,16 @@ static void Station_UpdateFaultInputs(void)
 
 void Station_App_Init(void)
 {
+  const HeaterControlContext *heater;
+
   station_context.state = STATION_STATE_BOOT;
   station_context.fault_flags = 0;
   station_context.last_tick_ms = 0;
-#if IRON_SIMULATION_MODE
-  station_context.calibration_valid = 1U;
-#else
-  station_context.calibration_valid = 0U;
-#endif
   station_forced_fault_flags = 0U;
 
   Heater_Control_Init();
+  heater = Heater_Control_GetContext();
+  station_context.calibration_valid = heater->calibration_valid;
 
   Station_UpdateFaultInputs();
 
@@ -66,6 +66,8 @@ void Station_App_Init(void)
 
 void Station_App_Tick(uint32_t now_ms)
 {
+  const HeaterControlContext *heater;
+
   if ((now_ms - station_context.last_tick_ms) < 10U)
   {
     return;
@@ -89,7 +91,21 @@ void Station_App_Tick(uint32_t now_ms)
   }
 
   Heater_Control_Tick(now_ms);
-  station_context.state = STATION_STATE_IDLE;
+  heater = Heater_Control_GetContext();
+  station_context.calibration_valid = heater->calibration_valid;
+
+  if (heater->tip_temp_cdeg + 50U < heater->target_temp_cdeg)
+  {
+    station_context.state = STATION_STATE_HEATING;
+  }
+  else if (heater->tip_temp_cdeg > heater->target_temp_cdeg + 80U)
+  {
+    station_context.state = STATION_STATE_HEATING;
+  }
+  else
+  {
+    station_context.state = STATION_STATE_READY;
+  }
 }
 
 void Station_SafeShutdown(void)

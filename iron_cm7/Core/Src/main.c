@@ -22,7 +22,9 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "app.h"
+#include "calibration.h"
 #include "heater.h"
+#include "max31856.h"
 #include "peripherals.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -64,10 +66,24 @@ volatile uint32_t g_debug_station_state = 0U;
 volatile uint32_t g_debug_fault_flags = 0U;
 volatile uint32_t g_debug_heater_measurement_ready = 0U;
 volatile uint32_t g_debug_heater_filtered_raw = 0U;
+volatile uint32_t g_debug_heater_current_raw = 0U;
+volatile uint32_t g_debug_buckboost_voltage_raw = 0U;
+volatile uint32_t g_debug_buckboost_ref_raw = 0U;
 volatile uint32_t g_debug_heater_sample_count = 0U;
 volatile uint32_t g_debug_heater_enable_level = 0U;
 volatile uint32_t g_debug_tip_clamp_level = 0U;
 volatile uint32_t g_debug_heater_pwm_compare = 0U;
+volatile uint32_t g_debug_tip_temp_cdeg = 0U;
+volatile uint32_t g_debug_target_temp_cdeg = 0U;
+volatile int32_t g_debug_ambient_temp_cdeg = 0;
+volatile uint32_t g_debug_power_watt_x10 = 0U;
+volatile uint32_t g_debug_external_tip_temp_cdeg = 0U;
+volatile int32_t g_debug_external_ambient_temp_cdeg = 0;
+volatile uint32_t g_debug_calibration_valid = 0U;
+volatile uint32_t g_debug_external_sensor_ready = 0U;
+volatile uint32_t g_debug_sim_tip_temp_cdeg = 0U;
+volatile uint32_t g_debug_sim_target_temp_cdeg = 0U;
+volatile uint32_t g_debug_sim_power_watt_x10 = 0U;
 
 static uint32_t debug_last_heartbeat_ms = 0U;
 static uint32_t debug_last_status_report_ms = 0U;
@@ -175,6 +191,10 @@ int main(void)
   Debug_Log("SIMULATION MODE active: fault inputs are virtual, calibration is auto-valid, ADC values are synthetic\r\n");
 #endif
   Debug_Log("LED1 heartbeat active, USART3 debug active, USER button injects a fault\r\n");
+  Debug_Log("calibration table valid=%u points=%u, MAX31856 init=%u\r\n",
+            (unsigned int)Calibration_HasValidTable(),
+            (unsigned int)Calibration_GetActiveTable()->point_count,
+            (unsigned int)Max31856_GetContext()->initialized);
 
   /* USER CODE END 2 */
 
@@ -196,10 +216,24 @@ int main(void)
       g_debug_fault_flags = station->fault_flags;
       g_debug_heater_measurement_ready = heater->measurement_ready;
       g_debug_heater_filtered_raw = heater->filtered_raw;
+      g_debug_heater_current_raw = heater->heater_current_raw;
+      g_debug_buckboost_voltage_raw = heater->buckboost_voltage_raw;
+      g_debug_buckboost_ref_raw = heater->buckboost_ref_raw;
       g_debug_heater_sample_count = heater->sample_count;
       g_debug_heater_enable_level = (uint32_t)HAL_GPIO_ReadPin(HEATER_EN_GPIO_Port, HEATER_EN_Pin);
       g_debug_tip_clamp_level = (uint32_t)HAL_GPIO_ReadPin(TIP_CLAMP_GPIO_Port, TIP_CLAMP_Pin);
       g_debug_heater_pwm_compare = __HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_1);
+      g_debug_tip_temp_cdeg = heater->tip_temp_cdeg;
+      g_debug_target_temp_cdeg = heater->target_temp_cdeg;
+      g_debug_ambient_temp_cdeg = heater->ambient_temp_cdeg;
+      g_debug_power_watt_x10 = heater->power_watt_x10;
+      g_debug_external_tip_temp_cdeg = heater->external_tip_temp_cdeg;
+      g_debug_external_ambient_temp_cdeg = heater->external_ambient_temp_cdeg;
+      g_debug_calibration_valid = heater->calibration_valid;
+      g_debug_external_sensor_ready = heater->external_sensor_ready;
+      g_debug_sim_tip_temp_cdeg = heater->simulated_tip_temp_cdeg;
+      g_debug_sim_target_temp_cdeg = heater->simulated_target_temp_cdeg;
+      g_debug_sim_power_watt_x10 = heater->simulated_power_watt_x10;
     }
 
     Debug_UpdateHeartbeat(now_ms);
@@ -361,7 +395,7 @@ static void MX_BringUpBoard_Init(void)
 
 static void Debug_Log(const char *format, ...)
 {
-  char buffer[160];
+  char buffer[256];
   va_list args;
   int length;
 
@@ -377,6 +411,8 @@ static void Debug_Log(const char *format, ...)
   if (length >= (int)sizeof(buffer))
   {
     length = (int)sizeof(buffer) - 1;
+    buffer[length - 1] = '\r';
+    buffer[length] = '\0';
   }
 
   (void)HAL_UART_Transmit(&huart3, (uint8_t *)buffer, (uint16_t)length, 100U);
@@ -412,6 +448,8 @@ static void Debug_ReportChanges(void)
   const StationContext *station = Station_App_GetContext();
   const HeaterControlContext *heater = Heater_Control_GetContext();
   char fault_text[96];
+  long ambient_whole;
+  long ambient_frac;
 
   if ((uint32_t)station->state != debug_last_logged_state)
   {
@@ -431,10 +469,27 @@ static void Debug_ReportChanges(void)
   if (heater->measurement_ready != debug_last_logged_measurement_ready)
   {
     debug_last_logged_measurement_ready = heater->measurement_ready;
-    Debug_Log("measurement ready=%u samples=%u raw=%u\r\n",
+    ambient_whole = (long)(heater->ambient_temp_cdeg / 10);
+    ambient_frac = (long)(heater->ambient_temp_cdeg >= 0 ? (heater->ambient_temp_cdeg % 10) : -(heater->ambient_temp_cdeg % 10));
+    Debug_Log("measurement ready=%u n=%u raw=%u current=%u vbus=%u vref=%u tip=%u.%uC tgt=%u.%uC amb=%ld.%ldC ext=%u.%uC cal=%u ext_ok=%u pwr=%u.%uW\r\n",
               (unsigned int)heater->measurement_ready,
               (unsigned int)heater->sample_count,
-              (unsigned int)heater->filtered_raw);
+              (unsigned int)heater->filtered_raw,
+              (unsigned int)heater->heater_current_raw,
+              (unsigned int)heater->buckboost_voltage_raw,
+              (unsigned int)heater->buckboost_ref_raw,
+              (unsigned int)(heater->tip_temp_cdeg / 10U),
+              (unsigned int)(heater->tip_temp_cdeg % 10U),
+              (unsigned int)(heater->target_temp_cdeg / 10U),
+              (unsigned int)(heater->target_temp_cdeg % 10U),
+              ambient_whole,
+              ambient_frac,
+              (unsigned int)(heater->external_tip_temp_cdeg / 10U),
+              (unsigned int)(heater->external_tip_temp_cdeg % 10U),
+              (unsigned int)heater->calibration_valid,
+              (unsigned int)heater->external_sensor_ready,
+              (unsigned int)(heater->power_watt_x10 / 10U),
+              (unsigned int)(heater->power_watt_x10 % 10U));
   }
 }
 
@@ -452,7 +507,7 @@ static void Debug_ReportPeriodicStatus(uint32_t now_ms)
   debug_last_status_report_ms = now_ms;
   Debug_FormatFaultFlags(station->fault_flags, fault_text, sizeof(fault_text));
 
-  Debug_Log("status t=%lu state=%s faults=%s heater_en=%lu tip_clamp=%lu pwm_cmp=%lu raw=%u samples=%u ready=%u\r\n",
+  Debug_Log("status t=%lu state=%s faults=%s en=%lu clamp=%lu pwm=%lu raw=%u cur=%u vbus=%u vref=%u tip=%u.%uC tgt=%u.%uC ext=%u.%uC cal=%u ext_ok=%u pwr=%u.%uW n=%u ready=%u\r\n",
             now_ms,
             Debug_GetStationStateName(station->state),
             fault_text,
@@ -460,6 +515,19 @@ static void Debug_ReportPeriodicStatus(uint32_t now_ms)
             g_debug_tip_clamp_level,
             g_debug_heater_pwm_compare,
             (unsigned int)heater->filtered_raw,
+            (unsigned int)heater->heater_current_raw,
+            (unsigned int)heater->buckboost_voltage_raw,
+            (unsigned int)heater->buckboost_ref_raw,
+            (unsigned int)(heater->tip_temp_cdeg / 10U),
+            (unsigned int)(heater->tip_temp_cdeg % 10U),
+            (unsigned int)(heater->target_temp_cdeg / 10U),
+            (unsigned int)(heater->target_temp_cdeg % 10U),
+            (unsigned int)(heater->external_tip_temp_cdeg / 10U),
+            (unsigned int)(heater->external_tip_temp_cdeg % 10U),
+            (unsigned int)heater->calibration_valid,
+            (unsigned int)heater->external_sensor_ready,
+            (unsigned int)(heater->power_watt_x10 / 10U),
+            (unsigned int)(heater->power_watt_x10 % 10U),
             (unsigned int)heater->sample_count,
             (unsigned int)heater->measurement_ready);
 }
@@ -473,6 +541,12 @@ static const char *Debug_GetStationStateName(StationState state)
 
     case STATION_STATE_IDLE:
       return "IDLE";
+
+    case STATION_STATE_HEATING:
+      return "HEATING";
+
+    case STATION_STATE_READY:
+      return "READY";
 
     case STATION_STATE_NO_CALIBRATION:
       return "NO_CAL";

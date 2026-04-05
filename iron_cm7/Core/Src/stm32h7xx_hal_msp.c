@@ -79,6 +79,52 @@ void HAL_MspInit(void)
 
 /* USER CODE BEGIN 1 */
 
+void HAL_ADC_MspInit(ADC_HandleTypeDef *hadc)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  if (hadc->Instance == ADC1)
+  {
+    __HAL_RCC_ADC12_CLK_ENABLE();
+    __HAL_RCC_GPIOF_CLK_ENABLE();
+
+    GPIO_InitStruct.Pin = THERMO_INT_ADC_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(THERMO_INT_ADC_GPIO_Port, &GPIO_InitStruct);
+  }
+  else if (hadc->Instance == ADC2)
+  {
+    __HAL_RCC_ADC12_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+
+    GPIO_InitStruct.Pin = ADC_HEATER_CURRENT_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(ADC_HEATER_CURRENT_GPIO_Port, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = ADC_BUCKBOOST_VOLTAGE_Pin;
+    HAL_GPIO_Init(ADC_BUCKBOOST_VOLTAGE_GPIO_Port, &GPIO_InitStruct);
+  }
+}
+
+void HAL_DAC_MspInit(DAC_HandleTypeDef *hdac)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  if (hdac->Instance == DAC1)
+  {
+    __HAL_RCC_DAC12_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    GPIO_InitStruct.Pin = BUCKBOOST_REF_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(BUCKBOOST_REF_GPIO_Port, &GPIO_InitStruct);
+  }
+}
+
 void HAL_I2C_MspInit(I2C_HandleTypeDef *hi2c)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -120,6 +166,38 @@ void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef *htim_pwm)
   else if (htim_pwm->Instance == TIM3)
   {
     __HAL_RCC_TIM3_CLK_ENABLE();
+  }
+}
+
+void HAL_SPI_MspInit(SPI_HandleTypeDef *hspi)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+
+  if (hspi->Instance == SPI1)
+  {
+    __HAL_RCC_SPI1_CLK_ENABLE();
+    __HAL_RCC_GPIOD_CLK_ENABLE();
+    __HAL_RCC_GPIOG_CLK_ENABLE();
+
+    GPIO_InitStruct.Pin = MAX31856_MOSI_Pin;
+    GPIO_InitStruct.Alternate = GPIO_AF5_SPI1;
+    HAL_GPIO_Init(MAX31856_MOSI_GPIO_Port, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = MAX31856_MISO_Pin | MAX31856_SCK_Pin;
+    HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
+  }
+  else if (hspi->Instance == SPI2)
+  {
+    __HAL_RCC_SPI2_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+
+    GPIO_InitStruct.Pin = DISPLAY_SPI_SCK_Pin | DISPLAY_SPI_MOSI_Pin;
+    GPIO_InitStruct.Alternate = GPIO_AF5_SPI2;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
   }
 }
 
