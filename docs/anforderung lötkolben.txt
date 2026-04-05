@@ -1,0 +1,646 @@
+Firmware-Spezifikation für mobile USB-PD-Lötstation
+===================================================
+
+1. Projektziel
+--------------
+
+Für eine mobile Lötstation mit einem STM32H755ZIT3 soll eine Firmware in C entwickelt werden.
+Die Firmware soll die Temperatur eines JBC-kompatiblen Lötkolbens regeln, Messwerte erfassen, Sicherheitsfunktionen umsetzen, eine Benutzeroberfläche bereitstellen und eine einmalige Kalibrierung der internen Temperaturmessung ermöglichen.
+
+Die erste Version soll bewusst einfach, robust und modular umgesetzt werden.
+Der STM32H755 ist zwar ein Dual-Core-Mikrocontroller, die erste Version soll aber nur auf einem Core laufen. Die Software soll trotzdem so aufgebaut sein, dass eine spätere Erweiterung grundsätzlich möglich bleibt.
+
+Wichtige Prioritäten:
+
+-   Sicherheit vor Komfort
+-   saubere und robuste Implementierung
+-   gut kommentierter Code
+-   modularer Aufbau
+-   gute Wartbarkeit
+-   gute Diagnosemöglichkeiten für Inbetriebnahme und Fehlersuche
+
+2. Entwicklungsumgebung
+-----------------------
+
+Die Firmware soll in Visual Studio Code entwickelt werden.
+Als Arbeitsumgebung werden die üblichen STM32-Erweiterungen für Visual Studio Code verwendet.
+
+Das Projekt soll so aufgebaut sein, dass es in dieser Umgebung direkt:
+
+-   bearbeitet,
+-   gebaut,
+-   geflasht
+-   und debuggt
+
+werden kann.
+
+Programmiersprache:
+
+-   C
+
+3. Programmierung und Debugging
+-------------------------------
+
+Für Programmierung und Debugging wird ein ST-Link verwendet.
+Die Verbindung erfolgt über die SWD-Schnittstelle.
+
+Vorhandene Debug-Signale:
+
+-   SWDIO
+-   SWCLK
+-   NRST
+-   SWO
+
+Bedeutung:
+
+-   SWD ist die Debug-Schnittstelle
+-   ST-Link ist der Debug-Adapter
+-   SWO ist ein zusätzlicher Trace-/Debug-Ausgang
+
+Zusätzlich soll bevorzugt auch eine USB-basierte Debug-/Diagnoseausgabe der Firmware möglich sein.
+
+4. Grundfunktion des Systems
+----------------------------
+
+Die Firmware soll mindestens folgende Hauptfunktionen umsetzen:
+
+1.  Temperaturregelung des Lötkolbens über einen PID-Regler
+2.  Ansteuerung des Heizers über 20 kHz PWM
+3.  Temperaturmessung über das interne Thermoelement des Lötkolbens
+4.  Heizleistungsberechnung aus Strom- und Spannungsmessung
+5.  Anzeige von Ist-Temperatur, Soll-Temperatur, Heizleistung und Status
+6.  Bedienung über Drehencoder mit Taster
+7.  Kalibrierung der internen Temperaturmessung mit externem Typ-K-Thermoelement
+8.  Sicherheitsüberwachung mit Abschaltung im Fehlerfall
+9.  Lüfteransteuerung
+10.  Speichern der letzten Solltemperatur
+11.  optional bzw. bevorzugt Debug-/Messwertausgabe über USB
+
+5. Systemübersicht
+------------------
+
+### 5.1 Mikrocontroller
+
+-   STM32H755ZIT3
+-   externer 25 MHz Quarz
+-   erste Version nur ein Core
+
+### 5.2 USB-PD-Versorgung
+
+Die Versorgung erfolgt über USB Power Delivery mit einem HUSB238A.
+
+Anforderung:
+
+-   bevorzugt 28 V / 5 A
+-   Fallback 20 V / 5 A
+-   niedrigere Leistungsstufen sind nicht gewünscht
+
+Wichtige Randbedingung:
+Der HUSB238A soll nicht im normalen Betrieb aktiv durch den STM32 geregelt werden.
+Er soll einmalig bei der Inbetriebnahme so konfiguriert werden, dass er die gewünschte PDO-Reihenfolge selbstständig aushandelt und für den Dauerbetrieb speichert.
+
+Wichtig:
+
+-   Nur der HUSB238A bekommt beim Einstecken sofort Versorgung.
+-   Die restliche Platine fährt erst hoch, wenn genügend Spannung vorhanden ist.
+-   Wenn keine ausreichende Versorgung vorhanden ist, startet die Hauptplatine gar nicht erst.
+-   Im normalen Betrieb ist daher keine laufende aktive PD-Regelung durch den STM erforderlich.
+
+6. Heizungsansteuerung
+----------------------
+
+Der Lötkolben-Heizer wird über einen MOSFET angesteuert.
+
+Vorhandene Signale:
+
+-   PWM-Signal für den Heizstrom
+-   separates Enable-Signal für den Leistungspfad
+-   Tip-Clamp-Signal zum Schutz des OPV-Eingangs
+
+PWM-Frequenz:
+
+-   20 kHz
+
+Wichtige Festlegung:
+
+-   Der PWM-Timer soll grundsätzlich weiterlaufen.
+-   Für Temperaturmessfenster wird die Heizleistung über den Enable-Pin kurzzeitig gesperrt.
+-   Der PWM-Timer selbst soll dabei nicht gestoppt werden.
+-   Die Mikrosekunden-genaue Abfolge der Messsequenz soll timerbasiert umgesetzt werden.
+-   Die konkrete Realisierung über Timer, Interrupts und/oder DMA ist Implementierungsentscheidung.
+
+7. Temperaturmessung im Normalbetrieb
+-------------------------------------
+
+Die Temperatur des Lötkolbens wird über das interne Thermoelement des Lötkolbens gemessen.
+Das Signal wird über einen OPV verstärkt und dann per ADC erfasst.
+
+Wichtige Besonderheit:
+Während der Heizphase muss der Eingangspfad per Tip-Clamp geschützt werden.
+Für die Temperaturmessung muss die Heizung kurz pausieren.
+
+### 7.1 Messrate
+
+Die Temperatur soll zunächst 50 mal pro Sekunde gemessen werden.
+
+Das entspricht:
+
+-   alle 20 ms ein Messfenster
+
+### 7.2 Off-Fenster
+
+Für jede Messung ist zunächst ein Off-Fenster von 200 µs vorgesehen.
+
+### 7.3 Exakte Messsequenz
+
+Für V1 ist folgende Reihenfolge vorgesehen:
+
+1.  `HEATER_EN` deaktivieren
+2.  15 µs warten
+3.  `TIP_CLAMP` freigeben
+4.  20 µs warten
+5.  8 ADC-Samples des internen Thermoelementsignals aufnehmen
+6.  `TIP_CLAMP` wieder aktivieren
+7.  5 bis 10 µs warten
+8.  `HEATER_EN` wieder aktivieren
+
+Wichtig:
+
+-   Der Clamp muss vor dem Wiederheizen wieder in die Schutzstellung gebracht werden.
+-   Die Abtastung muss im störarmen Off-Fenster erfolgen.
+-   Die numerische Auswertung darf direkt danach erfolgen.
+-   Alle Zeiten sollen softwareseitig parametrierbar bleiben.
+
+### 7.4 ADC-Anforderungen
+
+Die konkrete ADC-Clock, Sampling-Time und eventuelle Oversampling-Einstellungen sind Implementierungsentscheidung.
+
+Anforderungen:
+
+-   8 ADC-Samples müssen sicher innerhalb des 200-µs-Fensters erfasst werden
+-   die Abtastung muss zur analogen Signalquelle passen
+-   die Messung soll später per Softwareparameter anpassbar sein
+
+### 7.5 Bildung des Messwerts
+
+Empfohlene robuste Mittelung für V1:
+
+-   8 Samples erfassen
+-   Minimum und Maximum verwerfen
+-   die restlichen 6 Werte mitteln
+
+Ziel:
+
+-   Ausreißer unterdrücken
+-   Störspitzen reduzieren
+-   robusten Temperaturmesswert erhalten
+
+8. Temperaturregelung
+---------------------
+
+Die Spitzentemperatur soll über einen PID-Regler geregelt werden.
+
+Randbedingungen:
+
+-   Heizer-PWM: 20 kHz
+-   Temperaturmessung: zunächst 50 Hz
+-   Der Regler soll immer mit dem jeweils neuesten Temperaturmesswert arbeiten
+-   Zwischen zwei Temperaturmessungen bleibt der zuletzt berechnete Stellwert aktiv
+
+Die konkrete PID-Implementierung ist Entwicklerentscheidung.
+
+9. Berechnung der Spitzentemperatur
+-----------------------------------
+
+Im Normalbetrieb ergibt sich die Spitzentemperatur aus:
+
+1.  intern gemessenem Rohwert des verstärkten Thermoelementsignals
+2.  Kalibrierkennlinie / Lookup-Tabelle
+3.  Cold-Junction-Kompensation über den MCP9808
+
+Zwischen gespeicherten Kalibrierpunkten soll linear interpoliert werden.
+
+Ohne gültige Kalibrierdaten ist kein normaler Heizbetrieb erlaubt.
+
+10. Kalibrierung
+----------------
+
+10.1 Grundidee
+--------------
+
+Die Kalibrierung dient dazu, die Zuordnung zwischen:
+
+-   internem Rohsignal des Lötkolben-Thermoelements
+-   realer Spitzentemperatur
+
+einmalig zu bestimmen.
+
+Für die Kalibrierung wird ein externes Typ-K-Thermoelement verwendet, das an der Lötspitze angebracht wird.
+Dieses externe Thermoelement wird über einen MAX31856 ausgelesen.
+
+Wichtig:
+
+-   Im Kalibriermodus ist das externe Thermoelement die führende Referenzgröße
+-   das interne Signal wird nur mit der externen Referenz verknüpft
+-   ohne gültige Kalibrierung ist kein normaler Heizbetrieb zulässig
+
+10.2 Kalibrierverfahren
+-----------------------
+
+Die Kalibrierung soll stufenweise erfolgen.
+
+Geplante Temperaturstützpunkte:
+
+-   100 °C
+-   150 °C
+-   200 °C
+-   250 °C
+-   300 °C
+-   350 °C
+-   400 °C
+
+Zusätzlich soll der Kaltzustand bzw. Startzustand ebenfalls bekannt sein.
+
+10.3 Regelung während der Kalibrierung
+--------------------------------------
+
+Während der Kalibrierung wird nach der externen Temperatur geregelt, nicht nach dem internen Thermoelement.
+
+Das interne Signal wird dabei nur erfasst und gespeichert.
+
+Damit wird vermieden, dass bereits vor einer Kalibrierung eine funktionierende interne Temperaturregelung erforderlich ist.
+
+10.4 Stabilitätskriterium
+-------------------------
+
+Ein Kalibrierpunkt gilt als gültig, wenn:
+
+-   die externe Temperatur mindestens 2 Sekunden
+-   innerhalb von ±2 °C um den Zielwert liegt
+-   und ihre zeitliche Änderung klein ist
+
+Damit soll vermieden werden, dass ein Punkt nur beim Durchlaufen des Zielbereichs gespeichert wird.
+
+10.5 Erfassung eines Kalibrierpunkts
+------------------------------------
+
+Sobald ein Zielpunkt stabil ist:
+
+-   mehrere externe Temperaturwerte mitteln
+-   mehrere interne Rohwerte mitteln
+-   daraus ein Messpaar bilden
+-   Messpaar abspeichern
+
+10.6 Kalibrierdaten
+-------------------
+
+Die Kalibrierdaten sollen als Lookup-Tabelle (LUT) gespeichert werden.
+
+Empfehlung:
+
+-   pro Stützpunkt interner Rohwert + zugehörige Temperatur
+-   im Normalbetrieb lineare Interpolation zwischen zwei Punkten
+
+10.7 Verhalten ohne Kalibrierung
+--------------------------------
+
+Wenn keine gültigen Kalibrierdaten vorhanden sind:
+
+-   kein normaler Heizbetrieb
+-   nur Menüfunktionen und Kalibriermodus erlaubt
+-   dies muss klar angezeigt werden
+
+11. Spannungs- und Strommessung / Heizleistung
+----------------------------------------------
+
+Die Heizleistung soll aus gemessener Heizerspannung und gemessenem Heizstrom berechnet werden.
+
+### 11.1 Heizerspannung
+
+Die Heizerspannung wird per ADC gemessen.
+Der gemessene Spannungswert ist hardwareseitig um den Faktor 10 kleiner als die reale Spannung.
+
+Die Firmware muss diese Skalierung berücksichtigen.
+
+### 11.2 Heizstrom
+
+Der Heizstrom wird über das vorhandene Strommesssignal erfasst.
+
+### 11.3 Leistung
+
+Die Heizleistung wird berechnet als:
+
+P=U×IP = U \times IP=U×I
+
+Die Heizleistung soll in Watt angezeigt werden.
+
+12. Buck-Boost
+--------------
+
+Die Eingangsspannung wird über einen steuerbaren Buck-Boost auf die gewünschte Heizerspannung geregelt.
+
+Die Sollvorgabe erfolgt über einen DAC.
+
+Vorgaben:
+
+-   DAC-Referenzbereich: 1,5 V bis 3,0 V
+-   entspricht Buck-Boost-Ausgangsspannung von 15 V bis 30 V
+-   für V1 soll zunächst mit 24 V gearbeitet werden
+
+Ein Buck-Boost-Fault-Signal ist vorhanden und muss überwacht werden.
+
+13. Eingangsmessung / INA238
+----------------------------
+
+Die Eingangsleistung auf der PD-Seite wird über den INA238 per I²C gemessen.
+Zusätzlich ist ein Alert-Pin vorhanden.
+
+Diese Messung dient der Diagnose und Überwachung.
+
+14. Umgebungstemperatur / Cold-Junction
+---------------------------------------
+
+Die Umgebungstemperatur wird über einen MCP9808 per I²C gemessen.
+
+Diese Messung dient für:
+
+1.  Cold-Junction-Kompensation
+2.  Lüftersteuerung
+3.  Schutz gegen Übertemperatur des Geräts
+
+15. Lüfter
+----------
+
+Ein Lüfter ist vorgesehen mit den Funktionen:
+
+-   Fan Enable
+-   Fan PWM
+-   Fan Tacho
+
+Wichtig:
+In der unten aufgeführten Pinliste sind aktuell Fan-PWM und Fan Tacho enthalten.
+Falls für Fan Enable ein eigener Pin existiert, soll dieser laut Hardwarekonzept ebenfalls in der Firmware berücksichtigt werden. Die konkrete Zuordnung ist gegen die Hardwareunterlagen zu prüfen, falls sie nicht bereits separat dokumentiert ist.
+
+V1-Logik:
+
+-   ab einer definierten Umgebungstemperatur Lüfter einschalten
+-   zunächst einfache feste PWM
+-   Tachosignal überwachen
+-   fehlendes Tachosignal zunächst als Warnung behandeln
+
+Vorgeschlagener Startwert:
+
+-   ab 50 °C Umgebungstemperatur Lüfter aktivieren
+
+Zusätzlich:
+
+-   bei sehr hoher Umgebungstemperatur, z. B. 80 °C, harter Fehler
+
+16. Sicherheitsfunktionen
+-------------------------
+
+16.1 Grundprinzip
+-----------------
+
+Jeder sicherheitsrelevante Fehler soll:
+
+-   den Heizer sofort deaktivieren
+-   einen klaren Fehlertext anzeigen
+-   quittiert werden müssen
+
+Quittierung:
+
+-   über langen Tastendruck
+-   nur wenn die Fehlerursache nicht mehr anliegt
+
+16.2 Harte Fehler
+-----------------
+
+Folgende Fälle sollen als harte Fehler behandelt werden:
+
+1.  Spitzentemperatur über 450 °C
+2.  Overcurrent / Kurzschluss über INA300
+3.  Buck-Boost Fault
+4.  OPV-Versorgung PGOOD fehlerhaft
+5.  keine gültige Kalibrierung im Normalbetrieb
+6.  Umgebungstemperatur zu hoch, z. B. ab 80 °C
+7.  anhaltender Ausfall kritischer Sensorik
+
+Reaktion:
+
+-   Heizer sofort aus
+-   Fehlertext anzeigen
+-   Rückkehr nur nach Quittierung und verschwundener Ursache
+
+16.3 Warnungen
+--------------
+
+Folgende Fälle sollen zunächst nur als Warnung behandelt werden:
+
+-   einmaliger I²C-Fehler am MCP9808
+-   einmaliger Fehler am INA238
+-   fehlendes Lüftertacho-Signal trotz aktivem Lüfter
+
+Diese Warnungen dürfen angezeigt oder protokolliert werden, müssen aber nicht sofort den Heizbetrieb sperren.
+
+16.4 Eskalation
+---------------
+
+Wenn ein zunächst nichtkritischer Fehler dauerhaft bestehen bleibt, darf er in einen harten Fehler übergehen.
+
+Beispiel:
+
+-   MCP9808 dauerhaft nicht erreichbar
+-   Umgebungswert dauerhaft ungültig
+
+17. Benutzeroberfläche
+----------------------
+
+17.1 Display
+------------
+
+Display:
+
+-   SPI-Display
+-   170 x 320 Pixel
+-   Controller: ST7789
+
+Wichtige Anforderung:
+
+-   bevorzugt partielle Updates
+-   unnötige Vollbild-Neuzeichnungen vermeiden
+
+17.2 Hauptanzeige
+-----------------
+
+In der Hauptansicht sollen mindestens angezeigt werden:
+
+-   Ist-Temperatur groß
+-   Soll-Temperatur kleiner
+-   Heizleistung in Watt
+-   Statusanzeige, z. B.:
+    -   Ready
+    -   Heating
+    -   Calibration
+    -   Fault
+
+Ein Temperaturverlauf-Graph ist grundsätzlich interessant, aber für V1 optional und nicht verpflichtend.
+
+17.3 Bedienung
+--------------
+
+Bedienelement:
+
+-   Drehencoder mit Taster
+
+Bedienlogik für V1:
+
+-   Drehen: Solltemperatur ändern
+-   kurzer Tastendruck: Menü öffnen / bedienen
+-   langer Tastendruck: Fehler quittieren, sofern zulässig
+
+17.4 Menü
+---------
+
+Mindestens vorgesehen:
+
+-   Start Kalibrierung
+-   Anzeige, ob Kalibrierdaten vorhanden sind
+
+Nicht Bestandteil von V1:
+
+-   Sleep-Funktion
+-   Standby-Logik
+-   Boost-Funktion
+-   umfangreiche Personalisierung
+
+18. Persistente Daten
+---------------------
+
+Folgende Daten sollen mindestens gespeichert werden:
+
+-   letzte Solltemperatur
+-   Kalibrierdaten
+-   Status, ob gültige Kalibrierung vorhanden ist
+
+Weitere Komfortparameter sind für V1 nicht zwingend.
+
+19. Kommunikation / Diagnose
+----------------------------
+
+Bevorzugt soll eine Debug- und Diagnoseausgabe über USB möglich sein.
+Zusätzlich steht Debugging über ST-Link / SWD / SWO zur Verfügung.
+
+Sinnvolle Log- bzw. Diagnosewerte:
+
+-   Zeitstempel
+-   Ist-Temperatur
+-   Soll-Temperatur
+-   interner Rohwert
+-   externe Temperatur im Kalibriermodus
+-   Umgebungstemperatur
+-   PWM-Stellwert
+-   Heizleistung
+-   Heizerspannung
+-   Heizstrom
+-   Fehlerflags / Status
+
+Die konkrete Form der Debugausgabe ist offen.
+Eine einfache Umsetzung, z. B. über USB-CDC, ist ausreichend.
+
+20. Implementierungsfreiheit
+----------------------------
+
+Folgende Punkte sind nicht fest vorgeschrieben und können vom Entwickler passend gewählt werden:
+
+-   HAL / LL / registernahe Umsetzung
+-   bare metal oder RTOS
+-   konkrete Timer-/Interrupt-/DMA-Architektur
+-   genaue Modulstruktur
+-   genaue PID-Implementierung
+-   genaue USB-Debugstruktur
+
+Wichtig ist nur, dass die funktionalen Anforderungen dieser Spezifikation eingehalten werden.
+
+21. Pinbelegung
+===============
+
+Die folgende Pinliste ist 1:1 aus der vorliegenden Hardwarebeschreibung übernommen und soll ohne Interpretation als Referenz dienen.
+
+PG9: SDO vom MAX31856 auf SPI 1 SDO
+PG10: Cs vom MAX31856 als GPIO Output
+PG11: SCK vom MAX31856 auf SPI 1 SCK
+PG12: DRDY vom MAX31856 als GPIO Input
+PG13: Fault vom MAX31856 als GPIO Input
+PF6: Latch vom Ina300 als GPIO Output
+PF7: Operationsverstärker Netzteil PGood als GPIO Input
+PF9: TIP-Check GPIO Output
+PF10: TIP-Clamp als GPIO Output
+PF11: Ausgang des OPV vom Thermoelement zur Temperatur Erkennung auf dem ADC1 INP2
+PE2: PWM enable vom PWM mosfet für den Heizstrom als GPIO Output
+PE3: Over_current Erkennung als GPIO Eingang
+PE5: Fan-PWM Ausgang auf dem TIM15 CH1 (PWM Generation)
+PE9: Heizer PWM Ausgang auf dem TIM1 CH1 (PWM Generation)
+PE15: INT vom HUSB238A als GPIO Input
+PA0: Encoder-CH1 auf TIM5_CH1 im Encoder Mode
+PA1: Encoder-CH2 auf TIM5_CH2 im Encoder Mode
+PA2: Encoder Taster als GPIO Input
+PA4: Back-Boost ref eingang zum Spannung steuern auf DAC1 OUT1
+PA5: Buck-Boost Fault als GPIO Input
+PA6: INA241 Eingang auf ADC2 INP3
+PA7: Display Backlight auf TIM3 CH2 (PWM Generation)
+PA8: SCL vom MCP9808 auf I2C_3_SCL
+PA9: USB_VBUS_Sense auf USB_OTG_FS_VBUS
+PA11: USB_DM auf USB_OTG_FS_DM
+PA12: USB_DP auf USB_OTG_FS_DP
+PA13: Debug_SWDIO auf Debug_JTMS_SWDIO
+PA14: Debug_SWCLK auf Debug_JTMS_SWCLK
+PB3: Debug_SWO auf Debug_JTMS_SWO
+PB5: INA238 Alert als GPIO Input
+PB6: INA238 SCL auf I2C1 SCL
+PB7: INA238 SDA auf I2C1 SDA
+PB9: Fan Tacho auf TIM17 CH1 Input capture direct Mode
+PB10: SCL vom HUSB238A auf I2C_2 SCL
+PB11: SDA vom HUSB238A auf I2C_2 SDA
+PB13: Display SPI SCK auf SPI2_SCK
+PB14: Display DC als GPIO Output
+PB15: Display SPI Mosi auf SPI2_MOSi
+PC4: Buck-Boost ausgangsspannung ADC auf ADC2 INP4
+PC9: SDA vom mcp9808 auf I2C3_SDA
+PD7: MOSI vom MAX31856 auf SPI 1 MOSI
+PD8: Display reset als GPIO Output
+PD9: Display CS als GPIO Output
+PD10: Dock_Check GPIO Input
+
+22. Zusammenfassung der wichtigsten Festlegungen für V1
+=======================================================
+
+1.  Firmware in C
+2.  Entwicklung in Visual Studio Code mit STM32-Erweiterungen
+3.  Debugging über ST-Link via SWD, zusätzlich SWO
+4.  zunächst nur ein Core
+5.  Heizer mit 20 kHz PWM
+6.  PWM-Timer läuft durch, Heizer wird über Enable-Pin gesperrt
+7.  Temperaturmessung 50 Hz
+8.  Messfenster 200 µs
+9.  Messsequenz:
+    -   Heizer aus
+    -   15 µs warten
+    -   Clamp freigeben
+    -   20 µs warten
+    -   8 ADC-Samples
+    -   Clamp wieder aktivieren
+    -   5–10 µs warten
+    -   Heizer wieder an
+10.  robuste Mittelung der ADC-Werte
+11.  PID-Regelung im Normalbetrieb
+12.  Kalibrierung nur mit externem Thermoelement als Referenz
+13.  Kalibrierung in 50-°C-Schritten von 100 bis 400 °C
+14.  Kalibrierpunkte nur bei stabiler externer Temperatur übernehmen
+15.  Speicherung als LUT mit linearer Interpolation
+16.  normaler Heizbetrieb nur mit gültiger Kalibrierung
+17.  UI V1: Ist, Soll, Watt, Status
+18.  Fehler müssen angezeigt und quittiert werden
+19.  harter Übertemperaturschutz bei 450 °C
+20.  Lüftersteuerung einfach über Umgebungstemperatur
+21.  bevorzugt USB-Diagnoseausgabe
