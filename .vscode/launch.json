@@ -1,0 +1,18 @@
+{
+    "configurations": [
+        {
+            "name": "my_first_debug_configuration",
+            "type": "stlinkgdbtarget",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "preBuild": "${command:st-stm32-ide-debug-launch.build}",
+            "runEntry": "main",
+            "imagesAndSymbols": [
+                {
+                    "imageFileName": "${workspaceFolder}/CM7/build/nucleotest_CM7.elf"
+                }
+            ],
+            "verbose": false
+        }
+    ]
+}
