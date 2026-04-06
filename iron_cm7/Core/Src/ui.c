@@ -2,6 +2,7 @@
 
 #include "app.h"
 #include "calibration.h"
+#include "display.h"
 #include "heater.h"
 #include "main.h"
 #include "peripherals.h"
@@ -100,10 +101,23 @@ static void Ui_ExitMenu(void)
 static void Ui_ExecuteMenuAction(void)
 {
   const HeaterControlContext *heater = Heater_Control_GetContext();
+  uint8_t ack_result;
 
   switch ((UiMenuItem)ui_context.selected_menu_item)
   {
     case UI_MENU_START_CALIBRATION:
+      if (Calibration_IsBringUpSessionActive())
+      {
+        if (Calibration_CaptureBringUpPoint())
+        {
+          Ui_PublishEvent(UI_EVENT_CALIBRATION_POINT_CAPTURED, Calibration_GetSessionContext()->stored_point_count);
+          return;
+        }
+
+        Ui_PublishEvent(UI_EVENT_CALIBRATION_REJECTED, heater->external_sensor_ready);
+        break;
+      }
+
       if (heater->external_sensor_ready != 0U)
       {
         if (Calibration_StartBringUpSession(HAL_GetTick(), heater->external_tip_temp_cdeg, heater->filtered_raw))
@@ -120,6 +134,20 @@ static void Ui_ExecuteMenuAction(void)
     case UI_MENU_STREAM_TOGGLE:
       ui_context.stream_enabled = (uint8_t)!ui_context.stream_enabled;
       Ui_PublishEvent(UI_EVENT_STREAM_TOGGLED, ui_context.stream_enabled);
+      break;
+
+    case UI_MENU_DOCK_TOGGLE:
+      Station_App_SetDocked((uint8_t)(Station_App_GetContext()->docked == 0U));
+      Ui_PublishEvent(UI_EVENT_DOCK_TOGGLED, Station_App_GetContext()->docked);
+      break;
+
+    case UI_MENU_SCREEN_CYCLE:
+      Ui_PublishEvent(UI_EVENT_SCREEN_CHANGED, (uint16_t)Display_CyclePage());
+      break;
+
+    case UI_MENU_FAULT_ACK:
+      ack_result = Station_App_AcknowledgeFaults(STATION_FAULT_INJECTED);
+      Ui_PublishEvent(UI_EVENT_FAULT_ACK_RESULT, ack_result);
       break;
 
     case UI_MENU_EXIT:
@@ -144,10 +172,23 @@ static void Ui_HandleShortPress(void)
 
 static void Ui_HandleLongPress(void)
 {
+  if (Calibration_IsBringUpSessionActive())
+  {
+    if (Calibration_FinalizeBringUpSession())
+    {
+      (void)Storage_SaveCalibrationTable(Calibration_GetActiveTable());
+      Ui_PublishEvent(UI_EVENT_CALIBRATION_FINALIZED, Calibration_GetActiveTable()->point_count);
+    }
+    else
+    {
+      Ui_PublishEvent(UI_EVENT_CALIBRATION_FINALIZE_REJECTED, Calibration_GetSessionContext()->stored_point_count);
+    }
+    return;
+  }
+
   if (Station_App_GetContext()->state == STATION_STATE_FAULT)
   {
-    (void)Station_App_AcknowledgeFaults(STATION_FAULT_INJECTED);
-    Ui_PublishEvent(UI_EVENT_FAULT_CLEAR_REQUESTED, 0U);
+    Ui_PublishEvent(UI_EVENT_FAULT_ACK_RESULT, Station_App_AcknowledgeFaults(STATION_FAULT_INJECTED));
     return;
   }
 
@@ -249,6 +290,15 @@ const char *Ui_GetMenuItemName(UiMenuItem item)
 
     case UI_MENU_STREAM_TOGGLE:
       return "STREAM";
+
+    case UI_MENU_DOCK_TOGGLE:
+      return "DOCK";
+
+    case UI_MENU_SCREEN_CYCLE:
+      return "SCREEN";
+
+    case UI_MENU_FAULT_ACK:
+      return "FAULT_ACK";
 
     case UI_MENU_EXIT:
       return "EXIT";

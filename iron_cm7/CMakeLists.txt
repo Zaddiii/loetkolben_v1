@@ -60,10 +60,14 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/app.c
     Core/Src/calibration.c
+    Core/Src/display.c
+    Core/Src/fan.c
     Core/Src/heater.c
+    Core/Src/ina238.c
     Core/Src/mcp9808.c
     Core/Src/max31856.c
     Core/Src/peripherals.c
+    Core/Src/st7789.c
     Core/Src/storage.c
     Core/Src/ui.c
 )

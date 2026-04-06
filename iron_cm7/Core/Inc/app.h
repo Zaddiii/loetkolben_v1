@@ -11,18 +11,34 @@ typedef enum
   STATION_STATE_READY,
   STATION_STATE_CALIBRATION,
   STATION_STATE_NO_CALIBRATION,
+  STATION_STATE_STANDBY,
   STATION_STATE_FAULT
 } StationState;
+
+typedef enum
+{
+  STATION_OPERATING_MODE_IDLE = 0,
+  STATION_OPERATING_MODE_HEATUP,
+  STATION_OPERATING_MODE_HOLD,
+  STATION_OPERATING_MODE_COOLDOWN,
+  STATION_OPERATING_MODE_STANDBY,
+  STATION_OPERATING_MODE_CALIBRATION,
+  STATION_OPERATING_MODE_FAULT
+} StationOperatingMode;
 
 typedef struct
 {
   StationState state;
+  StationOperatingMode operating_mode;
   uint32_t fault_flags;
   uint32_t active_fault_flags;
   uint32_t warning_flags;
   uint32_t last_tick_ms;
+  uint16_t effective_target_temp_cdeg;
   uint8_t calibration_valid;
   uint8_t fault_ack_pending;
+  uint8_t docked;
+  uint8_t standby_active;
 } StationContext;
 
 enum
@@ -39,7 +55,9 @@ enum
 enum
 {
   STATION_WARNING_MCP9808_ERROR = (1UL << 0),
-  STATION_WARNING_AMBIENT_SENSOR_MISSING = (1UL << 1)
+  STATION_WARNING_AMBIENT_SENSOR_MISSING = (1UL << 1),
+  STATION_WARNING_INA238_ERROR = (1UL << 2),
+  STATION_WARNING_INA238_ALERT = (1UL << 3)
 };
 
 void Station_App_Init(void);
@@ -48,6 +66,7 @@ void Station_SafeShutdown(void);
 void Station_App_RequestFault(uint32_t fault_mask);
 void Station_App_ClearFault(uint32_t fault_mask);
 uint8_t Station_App_AcknowledgeFaults(uint32_t clearable_fault_mask);
+void Station_App_SetDocked(uint8_t docked);
 const StationContext *Station_App_GetContext(void);
 
 #endif

@@ -23,12 +23,17 @@
 /* USER CODE BEGIN Includes */
 #include "app.h"
 #include "calibration.h"
+#include "display.h"
+#include "fan.h"
 #include "heater.h"
+#include "ina238.h"
 #include "mcp9808.h"
 #include "max31856.h"
 #include "peripherals.h"
+#include "st7789.h"
 #include "storage.h"
 #include "ui.h"
+#include <ctype.h>
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -67,20 +72,26 @@
 volatile uint32_t g_debug_heartbeat = 0U;
 volatile uint32_t g_debug_loop_counter = 0U;
 volatile uint32_t g_debug_station_state = 0U;
+volatile uint32_t g_debug_station_mode = 0U;
+volatile uint32_t g_debug_station_docked = 0U;
 volatile uint32_t g_debug_fault_flags = 0U;
 volatile uint32_t g_debug_active_fault_flags = 0U;
 volatile uint32_t g_debug_warning_flags = 0U;
 volatile uint32_t g_debug_heater_measurement_ready = 0U;
 volatile uint32_t g_debug_heater_filtered_raw = 0U;
 volatile uint32_t g_debug_heater_current_raw = 0U;
+volatile uint32_t g_debug_heater_current_ma = 0U;
 volatile uint32_t g_debug_buckboost_voltage_raw = 0U;
+volatile uint32_t g_debug_buckboost_voltage_mv = 0U;
 volatile uint32_t g_debug_buckboost_ref_raw = 0U;
+volatile uint32_t g_debug_buckboost_target_mv = 0U;
 volatile uint32_t g_debug_heater_sample_count = 0U;
 volatile uint32_t g_debug_heater_enable_level = 0U;
 volatile uint32_t g_debug_tip_clamp_level = 0U;
 volatile uint32_t g_debug_heater_pwm_compare = 0U;
 volatile uint32_t g_debug_tip_temp_cdeg = 0U;
 volatile uint32_t g_debug_target_temp_cdeg = 0U;
+volatile uint32_t g_debug_effective_target_temp_cdeg = 0U;
 volatile int32_t g_debug_ambient_temp_cdeg = 0;
 volatile uint32_t g_debug_power_watt_x10 = 0U;
 volatile uint32_t g_debug_external_tip_temp_cdeg = 0U;
@@ -94,18 +105,24 @@ volatile uint32_t g_debug_sim_power_watt_x10 = 0U;
 volatile uint32_t g_debug_ui_screen = 0U;
 volatile uint32_t g_debug_ui_menu_item = 0U;
 volatile uint32_t g_debug_ui_save_pending = 0U;
+volatile uint32_t g_debug_fan_pwm_permille = 0U;
+volatile uint32_t g_debug_fan_tach_rpm = 0U;
+volatile uint32_t g_debug_display_version = 0U;
 
 static uint32_t debug_last_heartbeat_ms = 0U;
 static uint32_t debug_last_status_report_ms = 0U;
 static uint32_t debug_last_logged_state = 0xFFFFFFFFU;
+static uint32_t debug_last_logged_mode = 0xFFFFFFFFU;
+static uint32_t debug_last_logged_docked = 0xFFFFFFFFU;
 static uint32_t debug_last_logged_fault_flags = 0xFFFFFFFFU;
 static uint32_t debug_last_logged_warning_flags = 0xFFFFFFFFU;
 static uint32_t debug_last_logged_measurement_ready = 0xFFFFFFFFU;
 static uint32_t debug_last_ui_event_counter = 0U;
 static uint32_t debug_button_press_start_ms = 0U;
 static uint32_t debug_status_stream_period_ms = 1000U;
-static char debug_console_rx_buffer[48];
+static char debug_console_rx_buffer[128];
 static uint8_t debug_console_rx_length = 0U;
+static uint8_t debug_console_discard_until_newline = 0U;
 static GPIO_PinState debug_last_button_level = GPIO_PIN_RESET;
 static uint8_t debug_button_long_press_handled = 0U;
 static uint8_t debug_status_stream_enabled = 0U;
@@ -118,6 +135,7 @@ static uint8_t debug_status_stream_enabled = 0U;
 static void MX_GPIO_Init(void);
 static void MX_StationSafeState_Init(void);
 static void MX_BringUpBoard_Init(void);
+static void Debug_WriteRaw(const char *text, uint16_t length);
 static void Debug_Log(const char *format, ...);
 static void Debug_UpdateHeartbeat(uint32_t now_ms);
 static void Debug_HandleFaultButton(void);
@@ -125,11 +143,16 @@ static void Debug_HandleShortButtonPress(void);
 static void Debug_HandleLongButtonPress(void);
 static void Debug_PollConsole(void);
 static void Debug_ProcessConsoleCommand(const char *command);
+static void Debug_NormalizeConsoleCommand(char *command);
 static void Debug_PrintConsolePrompt(void);
 static void Debug_ReportUiEvents(void);
 static void Debug_ReportChanges(void);
 static void Debug_ReportPeriodicStatus(uint32_t now_ms, uint8_t force);
+static void Debug_ReportSimulationStatus(void);
+static void Debug_ReportInaStatus(void);
+static void Debug_ReportScreen(void);
 static const char *Debug_GetStationStateName(StationState state);
+static const char *Debug_GetStationOperatingModeName(StationOperatingMode mode);
 static void Debug_FormatFaultFlags(uint32_t fault_flags, char *buffer, size_t buffer_size);
 static void Debug_FormatWarningFlags(uint32_t warning_flags, char *buffer, size_t buffer_size);
 
@@ -210,18 +233,21 @@ int main(void)
   MX_BringUpBoard_Init();
   MX_StationPeripherals_Init();
   Station_App_Init();
+  Fan_Init();
   Ui_Init(debug_status_stream_enabled);
+  Display_Init();
   Debug_Log("iron_cm7 booted\r\n");
-  Debug_Log("bring-up profile=%u flags: fault_virtual=%u cal_virtual=%u adc_virtual=%u aux_virtual=%u mcp9808_virtual=%u max31856_virtual=%u\r\n",
+  Debug_Log("bring-up profile=%u flags: fault_virtual=%u cal_virtual=%u adc_virtual=%u aux_virtual=%u ina_virtual=%u mcp9808_virtual=%u max31856_virtual=%u\r\n",
             (unsigned int)IRON_BRINGUP_PROFILE,
             (unsigned int)IRON_VIRTUAL_FAULT_INPUTS,
             (unsigned int)IRON_VIRTUAL_CALIBRATION,
             (unsigned int)IRON_VIRTUAL_INTERNAL_ADC,
             (unsigned int)IRON_VIRTUAL_AUX_ADC,
+            (unsigned int)IRON_VIRTUAL_INA238,
             (unsigned int)IRON_VIRTUAL_MCP9808,
             (unsigned int)IRON_VIRTUAL_MAX31856);
   Debug_Log("LED1 heartbeat active, USART3 debug active, USER button short=calibration long=fault-ack-or-inject\r\n");
-  Debug_Log("UART commands: help, status, stream, stream on, stream off, stream <ms>, profile, target, target <degC>, storage, fault, fault ack, fault inject, ui\r\n");
+  Debug_Log("UART commands: help, ping, version, health, status, stream, stream on, stream off, stream <ms>, profile, target, target <degC>, storage, fault, fault ack, fault inject, ui, cal, sim, dock, fan, ina, screen\r\n");
   Debug_Log("status stream default=off\r\n");
   Debug_Log("storage flash_valid=%u err=%u target=%u.%uC cal_valid=%u pts=%u\r\n",
             (unsigned int)Storage_GetContext()->flash_data_valid,
@@ -230,9 +256,10 @@ int main(void)
             (unsigned int)(Storage_GetContext()->image.target_temp_cdeg % 10U),
             (unsigned int)Storage_GetContext()->image.calibration_valid,
             (unsigned int)Storage_GetContext()->image.point_count);
-  Debug_Log("calibration table valid=%u points=%u, MCP9808 init=%u err=%u hal=%u man=0x%04X dev=0x%04X, MAX31856 init=%u err=%u hal=%u\r\n",
+  Debug_Log("calibration table valid=%u points=%u source=%s, MCP9808 init=%u err=%u hal=%u man=0x%04X dev=0x%04X, MAX31856 init=%u err=%u hal=%u\r\n",
             (unsigned int)Calibration_HasValidTable(),
             (unsigned int)Calibration_GetActiveTable()->point_count,
+            (Storage_GetContext()->image.calibration_valid != 0U) ? "flash" : (IRON_VIRTUAL_CALIBRATION ? "virtual-default" : "none"),
             (unsigned int)Mcp9808_GetContext()->initialized,
             (unsigned int)Mcp9808_GetContext()->last_error,
             (unsigned int)Mcp9808_GetContext()->last_hal_status,
@@ -244,6 +271,18 @@ int main(void)
   Debug_Log("MAX31856 diag: err=%u hal=%u\r\n",
             (unsigned int)Max31856_GetContext()->last_error,
             (unsigned int)Max31856_GetContext()->last_hal_status);
+  Debug_Log("INA238 diag: init=%u err=%u hal=%u alert=%u bus=%umV current=%umA\r\n",
+            (unsigned int)Ina238_GetContext()->initialized,
+            (unsigned int)Ina238_GetContext()->last_error,
+            (unsigned int)Ina238_GetContext()->last_hal_status,
+            (unsigned int)Ina238_GetContext()->alert_active,
+            (unsigned int)Ina238_GetContext()->bus_voltage_mv,
+            (unsigned int)Ina238_GetContext()->current_ma);
+  Debug_Log("display hw: init=%u err=%u hal=%u bl=%u\r\n",
+            (unsigned int)St7789_GetContext()->initialized,
+            (unsigned int)St7789_GetContext()->last_error,
+            (unsigned int)St7789_GetContext()->last_hal_status,
+            (unsigned int)St7789_GetContext()->backlight_permille);
   Debug_PrintConsolePrompt();
 
   /* USER CODE END 2 */
@@ -255,7 +294,9 @@ int main(void)
     uint32_t now_ms = HAL_GetTick();
 
     Station_App_Tick(now_ms);
+    Fan_Tick(now_ms, Station_App_GetContext(), Heater_Control_GetContext());
     Ui_Tick(now_ms);
+    Display_Tick(now_ms);
 
     {
       const HeaterControlContext *heater = Heater_Control_GetContext();
@@ -273,20 +314,26 @@ int main(void)
       ++g_debug_loop_counter;
       g_debug_heartbeat = now_ms;
       g_debug_station_state = (uint32_t)station->state;
+      g_debug_station_mode = (uint32_t)station->operating_mode;
+      g_debug_station_docked = (uint32_t)station->docked;
       g_debug_fault_flags = station->fault_flags;
       g_debug_active_fault_flags = station->active_fault_flags;
       g_debug_warning_flags = station->warning_flags;
       g_debug_heater_measurement_ready = heater->measurement_ready;
       g_debug_heater_filtered_raw = heater->filtered_raw;
       g_debug_heater_current_raw = heater->heater_current_raw;
+      g_debug_heater_current_ma = heater->heater_current_ma;
       g_debug_buckboost_voltage_raw = heater->buckboost_voltage_raw;
+      g_debug_buckboost_voltage_mv = heater->buckboost_voltage_mv;
       g_debug_buckboost_ref_raw = heater->buckboost_ref_raw;
+      g_debug_buckboost_target_mv = heater->buckboost_target_mv;
       g_debug_heater_sample_count = heater->sample_count;
       g_debug_heater_enable_level = (uint32_t)HAL_GPIO_ReadPin(HEATER_EN_GPIO_Port, HEATER_EN_Pin);
       g_debug_tip_clamp_level = (uint32_t)HAL_GPIO_ReadPin(TIP_CLAMP_GPIO_Port, TIP_CLAMP_Pin);
       g_debug_heater_pwm_compare = __HAL_TIM_GET_COMPARE(&htim1, TIM_CHANNEL_1);
       g_debug_tip_temp_cdeg = heater->tip_temp_cdeg;
       g_debug_target_temp_cdeg = heater->target_temp_cdeg;
+      g_debug_effective_target_temp_cdeg = heater->effective_target_temp_cdeg;
       g_debug_ambient_temp_cdeg = heater->ambient_temp_cdeg;
       g_debug_power_watt_x10 = heater->power_watt_x10;
       g_debug_external_tip_temp_cdeg = heater->external_tip_temp_cdeg;
@@ -300,6 +347,9 @@ int main(void)
       g_debug_ui_screen = (uint32_t)ui->screen;
       g_debug_ui_menu_item = (uint32_t)ui->selected_menu_item;
       g_debug_ui_save_pending = (uint32_t)ui->save_pending;
+      g_debug_fan_pwm_permille = Fan_GetContext()->pwm_permille;
+      g_debug_fan_tach_rpm = Fan_GetContext()->tach_rpm;
+      g_debug_display_version = Display_GetContext()->version;
     }
 
     Debug_UpdateHeartbeat(now_ms);
@@ -461,11 +511,22 @@ static void MX_BringUpBoard_Init(void)
   debug_last_button_level = HAL_GPIO_ReadPin(USER_BUTTON_GPIO_Port, USER_BUTTON_Pin);
 }
 
+static void Debug_WriteRaw(const char *text, uint16_t length)
+{
+  if ((text == NULL) || (length == 0U))
+  {
+    return;
+  }
+
+  (void)HAL_UART_Transmit(&huart3, (uint8_t *)text, length, 100U);
+}
+
 static void Debug_Log(const char *format, ...)
 {
-  char buffer[256];
+  char buffer[384];
   va_list args;
   int length;
+  uint8_t input_in_progress = (debug_console_rx_length > 0U) ? 1U : 0U;
 
   va_start(args, format);
   length = vsnprintf(buffer, sizeof(buffer), format, args);
@@ -478,12 +539,28 @@ static void Debug_Log(const char *format, ...)
 
   if (length >= (int)sizeof(buffer))
   {
-    length = (int)sizeof(buffer) - 1;
-    buffer[length - 1] = '\r';
+    length = (int)sizeof(buffer) - 3;
+    buffer[length++] = '\r';
+    buffer[length++] = '\n';
     buffer[length] = '\0';
   }
 
-  (void)HAL_UART_Transmit(&huart3, (uint8_t *)buffer, (uint16_t)length, 100U);
+  if (input_in_progress != 0U)
+  {
+    static const char line_break[] = "\r\n";
+
+    Debug_WriteRaw(line_break, (uint16_t)(sizeof(line_break) - 1U));
+  }
+
+  Debug_WriteRaw(buffer, (uint16_t)length);
+
+  if (input_in_progress != 0U)
+  {
+    static const char prompt[] = "> ";
+
+    Debug_WriteRaw(prompt, (uint16_t)(sizeof(prompt) - 1U));
+    Debug_WriteRaw(debug_console_rx_buffer, debug_console_rx_length);
+  }
 }
 
 static void Debug_UpdateHeartbeat(uint32_t now_ms)
@@ -636,13 +713,39 @@ static void Debug_PollConsole(void)
   {
     if ((ch == '\r') || (ch == '\n'))
     {
-      if (debug_console_rx_length > 0U)
+      static const char line_break[] = "\r\n";
+
+      Debug_WriteRaw(line_break, (uint16_t)(sizeof(line_break) - 1U));
+
+      if (debug_console_discard_until_newline != 0U)
       {
-        debug_console_rx_buffer[debug_console_rx_length] = '\0';
-        Debug_ProcessConsoleCommand(debug_console_rx_buffer);
+        debug_console_discard_until_newline = 0U;
         debug_console_rx_length = 0U;
+        Debug_Log("console: command too long\r\n");
+        Debug_PrintConsolePrompt();
+        continue;
       }
 
+      if (debug_console_rx_length > 0U)
+      {
+        char command_buffer[sizeof(debug_console_rx_buffer)];
+
+        debug_console_rx_buffer[debug_console_rx_length] = '\0';
+        Debug_NormalizeConsoleCommand(debug_console_rx_buffer);
+        (void)snprintf(command_buffer, sizeof(command_buffer), "%s", debug_console_rx_buffer);
+        debug_console_rx_length = 0U;
+        Debug_ProcessConsoleCommand(command_buffer);
+      }
+      else
+      {
+        Debug_PrintConsolePrompt();
+      }
+
+      continue;
+    }
+
+    if (debug_console_discard_until_newline != 0U)
+    {
       continue;
     }
 
@@ -653,15 +756,61 @@ static void Debug_PollConsole(void)
     else
     {
       debug_console_rx_length = 0U;
-      Debug_Log("console: command too long\r\n");
-      Debug_PrintConsolePrompt();
+      debug_console_discard_until_newline = 1U;
     }
   }
 }
 
+static void Debug_NormalizeConsoleCommand(char *command)
+{
+  size_t read_index;
+  size_t write_index = 0U;
+  size_t start_index = 0U;
+  size_t end_index;
+
+  if (command == NULL)
+  {
+    return;
+  }
+
+  for (read_index = 0U; command[read_index] != '\0'; ++read_index)
+  {
+    unsigned char current = (unsigned char)command[read_index];
+
+    if ((current < 0x20U) && (current != ' '))
+    {
+      continue;
+    }
+
+    command[write_index++] = (char)current;
+  }
+
+  command[write_index] = '\0';
+
+  while ((command[start_index] != '\0') && isspace((unsigned char)command[start_index]))
+  {
+    ++start_index;
+  }
+
+  end_index = strlen(command);
+  while ((end_index > start_index) && isspace((unsigned char)command[end_index - 1U]))
+  {
+    --end_index;
+  }
+
+  if (start_index > 0U)
+  {
+    memmove(command, command + start_index, end_index - start_index);
+  }
+
+  command[end_index - start_index] = '\0';
+}
+
 static void Debug_PrintConsolePrompt(void)
 {
-  Debug_Log("> ");
+  static const char prompt[] = "> ";
+
+  Debug_WriteRaw(prompt, (uint16_t)(sizeof(prompt) - 1U));
 }
 
 static void Debug_ProcessConsoleCommand(const char *command)
@@ -676,7 +825,46 @@ static void Debug_ProcessConsoleCommand(const char *command)
 
   if (strcmp(command, "help") == 0)
   {
-    Debug_Log("commands: help | status | stream | stream on | stream off | stream <ms> | profile | target | target <degC> | storage | fault | fault ack | fault inject | ui\r\n");
+    Debug_Log("commands: help | ping | version | health | status | stream | stream on | stream off | stream <ms> | profile | target | target <degC> | storage | fault | fault ack | fault inject | ui | cal | cal start | cal point | cal finish | cal cancel | sim | sim ambient <degC> | sim load <percent> | sim tip <degC> | sim reset | dock | dock on | dock off | dock toggle | fan | ina | screen | screen next | screen <page>\r\n");
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "ping") == 0)
+  {
+    Debug_Log("pong t=%lu loop=%lu\r\n",
+              (unsigned long)HAL_GetTick(),
+              (unsigned long)g_debug_loop_counter);
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "version") == 0)
+  {
+    Debug_Log("version iron_cm7 build=%s %s profile=%u git=workspace\r\n",
+              __DATE__,
+              __TIME__,
+              (unsigned int)IRON_BRINGUP_PROFILE);
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "health") == 0)
+  {
+    const StationContext *station = Station_App_GetContext();
+    const HeaterControlContext *heater = Heater_Control_GetContext();
+
+    Debug_Log("health state=%s mode=%s faults=0x%08lX warns=0x%08lX meas=%u stream=%u disp=%u ina=%u amb=%u ext=%u\r\n",
+              Debug_GetStationStateName(station->state),
+              Debug_GetStationOperatingModeName(station->operating_mode),
+              station->fault_flags,
+              station->warning_flags,
+              (unsigned int)heater->measurement_ready,
+              (unsigned int)debug_status_stream_enabled,
+              (unsigned int)St7789_GetContext()->initialized,
+              (unsigned int)Ina238_GetContext()->initialized,
+              (unsigned int)heater->ambient_sensor_ready,
+              (unsigned int)heater->external_sensor_ready);
     Debug_PrintConsolePrompt();
     return;
   }
@@ -739,14 +927,16 @@ static void Debug_ProcessConsoleCommand(const char *command)
 
   if (strcmp(command, "profile") == 0)
   {
-    Debug_Log("profile=%u fault_virtual=%u cal_virtual=%u adc_virtual=%u aux_virtual=%u mcp9808_virtual=%u max31856_virtual=%u\r\n",
+    Debug_Log("profile=%u fault_virtual=%u cal_virtual=%u adc_virtual=%u aux_virtual=%u ina_virtual=%u mcp9808_virtual=%u max31856_virtual=%u dock_virtual=%u\r\n",
               (unsigned int)IRON_BRINGUP_PROFILE,
               (unsigned int)IRON_VIRTUAL_FAULT_INPUTS,
               (unsigned int)IRON_VIRTUAL_CALIBRATION,
               (unsigned int)IRON_VIRTUAL_INTERNAL_ADC,
               (unsigned int)IRON_VIRTUAL_AUX_ADC,
+              (unsigned int)IRON_VIRTUAL_INA238,
               (unsigned int)IRON_VIRTUAL_MCP9808,
-              (unsigned int)IRON_VIRTUAL_MAX31856);
+              (unsigned int)IRON_VIRTUAL_MAX31856,
+              (unsigned int)IRON_VIRTUAL_DOCK_INPUT);
     Debug_PrintConsolePrompt();
     return;
   }
@@ -846,9 +1036,10 @@ static void Debug_ProcessConsoleCommand(const char *command)
   {
     const UiContext *ui = Ui_GetContext();
 
-    Debug_Log("ui: screen=%s menu=%s save_pending=%u target=%u.%uC stream=%u\r\n",
+    Debug_Log("ui: screen=%s menu=%s page=%s save_pending=%u target=%u.%uC stream=%u\r\n",
               (ui->screen == UI_SCREEN_MAIN) ? "MAIN" : "MENU",
               Ui_GetMenuItemName((UiMenuItem)ui->selected_menu_item),
+              Display_GetPageName((DisplayPage)Display_GetContext()->page),
               (unsigned int)ui->save_pending,
               (unsigned int)(ui->target_temp_cdeg / 10U),
               (unsigned int)(ui->target_temp_cdeg % 10U),
@@ -857,8 +1048,307 @@ static void Debug_ProcessConsoleCommand(const char *command)
     return;
   }
 
+  if (strcmp(command, "cal") == 0)
+  {
+    const CalibrationSessionContext *session = Calibration_GetSessionContext();
+
+    Debug_Log("cal: active=%u valid=%u pts=%u next=%u.%uC stable=%u hold=%lums cap=%u ext=%u.%uC raw=%u\r\n",
+              (unsigned int)session->active,
+              (unsigned int)Calibration_HasValidTable(),
+              (unsigned int)(session->active ? session->stored_point_count : Calibration_GetActiveTable()->point_count),
+              (unsigned int)(session->target_temp_cdeg / 10U),
+              (unsigned int)(session->target_temp_cdeg % 10U),
+              (unsigned int)session->stable,
+              (unsigned long)session->stable_time_ms,
+              (unsigned int)session->capture_ready,
+              (unsigned int)(session->averaged_external_tip_temp_cdeg / 10U),
+              (unsigned int)(session->averaged_external_tip_temp_cdeg % 10U),
+              (unsigned int)session->averaged_internal_raw);
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "cal start") == 0)
+  {
+    const HeaterControlContext *heater = Heater_Control_GetContext();
+
+    if (Calibration_StartBringUpSession(HAL_GetTick(), heater->external_tip_temp_cdeg, heater->filtered_raw))
+    {
+      Debug_Log("calibration session started\r\n");
+    }
+    else
+    {
+      Debug_Log("calibration start failed\r\n");
+    }
+
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "cal point") == 0)
+  {
+    if (Calibration_CaptureBringUpPoint())
+    {
+      Debug_Log("calibration point captured pts=%u next=%u.%uC\r\n",
+                (unsigned int)Calibration_GetSessionContext()->stored_point_count,
+                (unsigned int)(Calibration_GetSessionContext()->target_temp_cdeg / 10U),
+                (unsigned int)(Calibration_GetSessionContext()->target_temp_cdeg % 10U));
+    }
+    else
+    {
+      Debug_Log("calibration point capture rejected\r\n");
+    }
+
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "cal finish") == 0)
+  {
+    if (Calibration_FinalizeBringUpSession())
+    {
+      (void)Storage_SaveCalibrationTable(Calibration_GetActiveTable());
+      Debug_Log("calibration finalized pts=%u valid=%u\r\n",
+                (unsigned int)Calibration_GetActiveTable()->point_count,
+                (unsigned int)Calibration_HasValidTable());
+    }
+    else
+    {
+      Debug_Log("calibration finalize rejected\r\n");
+    }
+
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "cal cancel") == 0)
+  {
+    Calibration_CancelBringUpSession();
+    Debug_Log("calibration canceled\r\n");
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "dock") == 0)
+  {
+    const StationContext *station = Station_App_GetContext();
+
+    Debug_Log("dock=%s standby=%u eff_target=%u.%uC\r\n",
+              station->docked ? "on" : "off",
+              (unsigned int)station->standby_active,
+              (unsigned int)(station->effective_target_temp_cdeg / 10U),
+              (unsigned int)(station->effective_target_temp_cdeg % 10U));
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "dock on") == 0)
+  {
+    Station_App_SetDocked(1U);
+    Debug_Log("dock enabled\r\n");
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "dock off") == 0)
+  {
+    Station_App_SetDocked(0U);
+    Debug_Log("dock disabled\r\n");
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "dock toggle") == 0)
+  {
+    Station_App_SetDocked((uint8_t)(Station_App_GetContext()->docked == 0U));
+    Debug_Log("dock toggled -> %s\r\n", Station_App_GetContext()->docked ? "on" : "off");
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "fan") == 0)
+  {
+    const FanContext *fan = Fan_GetContext();
+
+    Debug_Log("fan: pwm=%u req=%u rpm=%u enabled=%u cooling=%u\r\n",
+              (unsigned int)fan->pwm_permille,
+              (unsigned int)fan->requested_pwm_permille,
+              (unsigned int)fan->tach_rpm,
+              (unsigned int)fan->enabled,
+              (unsigned int)fan->cooling_request);
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "ina") == 0)
+  {
+    Debug_ReportInaStatus();
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "screen") == 0)
+  {
+    Debug_ReportScreen();
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "screen next") == 0)
+  {
+    Debug_Log("screen page=%s\r\n", Display_GetPageName(Display_CyclePage()));
+    Debug_ReportScreen();
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "screen overview") == 0)
+  {
+    Display_SetPage(DISPLAY_PAGE_OVERVIEW);
+    Debug_ReportScreen();
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "screen thermal") == 0)
+  {
+    Display_SetPage(DISPLAY_PAGE_THERMAL);
+    Debug_ReportScreen();
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "screen control") == 0)
+  {
+    Display_SetPage(DISPLAY_PAGE_CONTROL);
+    Debug_ReportScreen();
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "screen cal") == 0)
+  {
+    Display_SetPage(DISPLAY_PAGE_CALIBRATION);
+    Debug_ReportScreen();
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "sim") == 0)
+  {
+    Debug_ReportSimulationStatus();
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  {
+    unsigned int sim_ambient_deg_c;
+
+    if (sscanf(command, "sim ambient %u", &sim_ambient_deg_c) == 1)
+    {
+      Heater_Simulation_SetAmbientTempCdeg((uint16_t)(sim_ambient_deg_c * 10U));
+      Debug_ReportSimulationStatus();
+      Debug_PrintConsolePrompt();
+      return;
+    }
+  }
+
+  {
+    unsigned int sim_load_percent;
+
+    if (sscanf(command, "sim load %u", &sim_load_percent) == 1)
+    {
+      Heater_Simulation_SetThermalLoadPermille((uint16_t)(sim_load_percent * 10U));
+      Debug_ReportSimulationStatus();
+      Debug_PrintConsolePrompt();
+      return;
+    }
+  }
+
+  {
+    unsigned int sim_tip_deg_c;
+
+    if (sscanf(command, "sim tip %u", &sim_tip_deg_c) == 1)
+    {
+      Heater_Simulation_SetTipTempCdeg((uint16_t)(sim_tip_deg_c * 10U));
+      Debug_ReportSimulationStatus();
+      Debug_PrintConsolePrompt();
+      return;
+    }
+  }
+
+  if (strcmp(command, "sim reset") == 0)
+  {
+    Heater_Simulation_Reset();
+    Debug_ReportSimulationStatus();
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
   Debug_Log("unknown command: %s\r\n", command);
   Debug_PrintConsolePrompt();
+}
+
+static void Debug_ReportSimulationStatus(void)
+{
+  const HeaterControlContext *heater = Heater_Control_GetContext();
+
+  Debug_Log("sim: amb=%u.%uC base=%u.%uC tip=%u.%uC ext=%u.%uC set=%u.%uC eff=%u.%uC pwm=%u req=%u load=%u.%u%% pwr=%u.%uW\r\n",
+            (unsigned int)(heater->simulated_ambient_temp_cdeg / 10U),
+            (unsigned int)(heater->simulated_ambient_temp_cdeg % 10U),
+            (unsigned int)(heater->simulated_ambient_base_temp_cdeg / 10U),
+            (unsigned int)(heater->simulated_ambient_base_temp_cdeg % 10U),
+            (unsigned int)(heater->simulated_tip_temp_cdeg / 10U),
+            (unsigned int)(heater->simulated_tip_temp_cdeg % 10U),
+            (unsigned int)(heater->simulated_external_tip_temp_cdeg / 10U),
+            (unsigned int)(heater->simulated_external_tip_temp_cdeg % 10U),
+            (unsigned int)(heater->target_temp_cdeg / 10U),
+            (unsigned int)(heater->target_temp_cdeg % 10U),
+            (unsigned int)(heater->effective_target_temp_cdeg / 10U),
+            (unsigned int)(heater->effective_target_temp_cdeg % 10U),
+            (unsigned int)heater->pwm_permille,
+            (unsigned int)heater->simulated_requested_pwm_permille,
+            (unsigned int)(heater->simulated_thermal_load_permille / 10U),
+            (unsigned int)(heater->simulated_thermal_load_permille % 10U),
+            (unsigned int)(heater->simulated_power_watt_x10 / 10U),
+            (unsigned int)(heater->simulated_power_watt_x10 % 10U));
+}
+
+static void Debug_ReportInaStatus(void)
+{
+  const Ina238Context *ina238 = Ina238_GetContext();
+
+  Debug_Log("ina: init=%u ready=%u err=%u hal=%u alert=%u man=0x%04X dev=0x%04X vbus=%umV current=%umA power=%umW raw_v=%u raw_i=%u raw_p=%u\r\n",
+            (unsigned int)ina238->initialized,
+            (unsigned int)ina238->data_ready,
+            (unsigned int)ina238->last_error,
+            (unsigned int)ina238->last_hal_status,
+            (unsigned int)ina238->alert_active,
+            (unsigned int)ina238->manufacturer_id,
+            (unsigned int)ina238->device_id,
+            (unsigned int)ina238->bus_voltage_mv,
+            (unsigned int)ina238->current_ma,
+            (unsigned int)ina238->power_mw,
+            (unsigned int)ina238->bus_voltage_raw,
+            (unsigned int)ina238->current_raw,
+            (unsigned int)ina238->power_raw);
+}
+
+static void Debug_ReportScreen(void)
+{
+  const DisplayContext *display = Display_GetContext();
+  const St7789Context *st7789 = St7789_GetContext();
+
+  Debug_Log("screen[%lu] hw=%u err=%u bl=%u page=%s: %s | %s | %s | %s\r\n",
+            (unsigned long)display->version,
+            (unsigned int)st7789->initialized,
+            (unsigned int)st7789->last_error,
+            (unsigned int)st7789->backlight_permille,
+            Display_GetPageName((DisplayPage)display->page),
+            display->lines[0],
+            display->lines[1],
+            display->lines[2],
+            display->lines[3]);
 }
 
 static void Debug_ReportUiEvents(void)
@@ -903,6 +1393,18 @@ static void Debug_ReportUiEvents(void)
       Debug_Log("ui calibration started\r\n");
       break;
 
+    case UI_EVENT_CALIBRATION_POINT_CAPTURED:
+      Debug_Log("ui calibration point captured: pts=%u\r\n", (unsigned int)ui->event_value);
+      break;
+
+    case UI_EVENT_CALIBRATION_FINALIZED:
+      Debug_Log("ui calibration finalized: pts=%u\r\n", (unsigned int)ui->event_value);
+      break;
+
+    case UI_EVENT_CALIBRATION_FINALIZE_REJECTED:
+      Debug_Log("ui calibration finalize rejected: pts=%u\r\n", (unsigned int)ui->event_value);
+      break;
+
     case UI_EVENT_CALIBRATION_REJECTED:
       Debug_Log("ui calibration rejected: ext_ok=%u\r\n", (unsigned int)ui->event_value);
       break;
@@ -912,8 +1414,20 @@ static void Debug_ReportUiEvents(void)
       Debug_Log("ui stream %s\r\n", ui->stream_enabled ? "enabled" : "disabled");
       break;
 
+    case UI_EVENT_DOCK_TOGGLED:
+      Debug_Log("ui dock %s\r\n", ui->event_value ? "enabled" : "disabled");
+      break;
+
+    case UI_EVENT_SCREEN_CHANGED:
+      Debug_Log("ui screen page=%s\r\n", Display_GetPageName((DisplayPage)ui->event_value));
+      break;
+
     case UI_EVENT_FAULT_CLEAR_REQUESTED:
       Debug_Log("ui fault clear requested\r\n");
+      break;
+
+    case UI_EVENT_FAULT_ACK_RESULT:
+      Debug_Log("ui fault ack %s\r\n", ui->event_value ? "accepted" : "rejected");
       break;
 
     default:
@@ -936,6 +1450,23 @@ static void Debug_ReportChanges(void)
     Debug_Log("station state=%s (%lu)\r\n",
               Debug_GetStationStateName(station->state),
               debug_last_logged_state);
+  }
+
+  if ((uint32_t)station->operating_mode != debug_last_logged_mode)
+  {
+    debug_last_logged_mode = (uint32_t)station->operating_mode;
+    Debug_Log("station mode=%s (%lu)\r\n",
+              Debug_GetStationOperatingModeName(station->operating_mode),
+              debug_last_logged_mode);
+  }
+
+  if ((uint32_t)station->docked != debug_last_logged_docked)
+  {
+    debug_last_logged_docked = (uint32_t)station->docked;
+    Debug_Log("dock state=%s eff_target=%u.%uC\r\n",
+              station->docked ? "DOCKED" : "UNDOCKED",
+              (unsigned int)(station->effective_target_temp_cdeg / 10U),
+              (unsigned int)(station->effective_target_temp_cdeg % 10U));
   }
 
   if (station->fault_flags != debug_last_logged_fault_flags)
@@ -961,13 +1492,16 @@ static void Debug_ReportChanges(void)
     debug_last_logged_measurement_ready = heater->measurement_ready;
     ambient_whole = (long)(heater->ambient_temp_cdeg / 10);
     ambient_frac = (long)(heater->ambient_temp_cdeg >= 0 ? (heater->ambient_temp_cdeg % 10) : -(heater->ambient_temp_cdeg % 10));
-    Debug_Log("measurement ready=%u n=%u raw=%u current=%u vbus=%u vref=%u tip=%u.%uC tgt=%u.%uC amb=%ld.%ldC ext=%u.%uC cal=%u amb_ok=%u ext_ok=%u pwr=%u.%uW\r\n",
+    Debug_Log("measurement ready=%u n=%u raw=%u current=%u/%umA vbus=%u/%umV vref=%u tgt_v=%umV tip=%u.%uC tgt=%u.%uC amb=%ld.%ldC ext=%u.%uC cal=%u amb_ok=%u ext_ok=%u pwr=%u.%uW\r\n",
               (unsigned int)heater->measurement_ready,
               (unsigned int)heater->sample_count,
               (unsigned int)heater->filtered_raw,
               (unsigned int)heater->heater_current_raw,
+          (unsigned int)heater->heater_current_ma,
               (unsigned int)heater->buckboost_voltage_raw,
+          (unsigned int)heater->buckboost_voltage_mv,
               (unsigned int)heater->buckboost_ref_raw,
+          (unsigned int)heater->buckboost_target_mv,
               (unsigned int)(heater->tip_temp_cdeg / 10U),
               (unsigned int)(heater->tip_temp_cdeg % 10U),
               (unsigned int)(heater->target_temp_cdeg / 10U),
@@ -989,6 +1523,7 @@ static void Debug_ReportPeriodicStatus(uint32_t now_ms, uint8_t force)
   const StationContext *station = Station_App_GetContext();
   const HeaterControlContext *heater = Heater_Control_GetContext();
   const CalibrationSessionContext *session = Calibration_GetSessionContext();
+  const Ina238Context *ina238 = Ina238_GetContext();
   const Mcp9808Context *mcp9808 = Mcp9808_GetContext();
   const Max31856Context *max31856 = Max31856_GetContext();
   char fault_text[96];
@@ -1008,9 +1543,11 @@ static void Debug_ReportPeriodicStatus(uint32_t now_ms, uint8_t force)
   Debug_FormatFaultFlags(station->fault_flags, fault_text, sizeof(fault_text));
   Debug_FormatWarningFlags(station->warning_flags, warning_text, sizeof(warning_text));
 
-  Debug_Log("status t=%lu state=%s faults=%s active=0x%08lX warns=%s ack=%u en=%lu clamp=%lu pwm=%lu raw=%u cur=%u vbus=%u vref=%u tip=%u.%uC tgt=%u.%uC ext=%u.%uC cal=%u amb_ok=%u ext_ok=%u mcp_init=%u mcp_err=%u mcp_hal=%u max_init=%u max_err=%u max_hal=%u cal_mode=%u cal_target=%u.%uC cal_stable=%u hold=%lums pts=%u pwr=%u.%uW n=%u ready=%u\r\n",
+  Debug_Log("status t=%lu state=%s mode=%s dock=%u faults=%s active=0x%08lX warns=%s ack=%u en=%lu clamp=%lu pwm=%lu fan=%u rpm=%u sim_req=%u sim_load=%u\r\n",
             now_ms,
             Debug_GetStationStateName(station->state),
+            Debug_GetStationOperatingModeName(station->operating_mode),
+            (unsigned int)station->docked,
             fault_text,
             station->active_fault_flags,
             warning_text,
@@ -1018,19 +1555,40 @@ static void Debug_ReportPeriodicStatus(uint32_t now_ms, uint8_t force)
             g_debug_heater_enable_level,
             g_debug_tip_clamp_level,
             g_debug_heater_pwm_compare,
+            (unsigned int)Fan_GetContext()->pwm_permille,
+            (unsigned int)Fan_GetContext()->tach_rpm,
+            (unsigned int)heater->simulated_requested_pwm_permille,
+            (unsigned int)heater->simulated_thermal_load_permille);
+  Debug_Log("status therm raw=%u cur=%u/%umA vbus=%u/%umV vref=%u tgt_v=%umV tip=%u.%uC set=%u.%uC eff=%u.%uC amb=%u.%uC ext=%u.%uC pwr=%u.%uW n=%u ready=%u\r\n",
             (unsigned int)heater->filtered_raw,
             (unsigned int)heater->heater_current_raw,
+            (unsigned int)heater->heater_current_ma,
             (unsigned int)heater->buckboost_voltage_raw,
+            (unsigned int)heater->buckboost_voltage_mv,
             (unsigned int)heater->buckboost_ref_raw,
+            (unsigned int)heater->buckboost_target_mv,
             (unsigned int)(heater->tip_temp_cdeg / 10U),
             (unsigned int)(heater->tip_temp_cdeg % 10U),
             (unsigned int)(heater->target_temp_cdeg / 10U),
             (unsigned int)(heater->target_temp_cdeg % 10U),
+            (unsigned int)(heater->effective_target_temp_cdeg / 10U),
+            (unsigned int)(heater->effective_target_temp_cdeg % 10U),
+            (unsigned int)(heater->ambient_temp_cdeg / 10),
+            (unsigned int)((heater->ambient_temp_cdeg >= 0) ? (heater->ambient_temp_cdeg % 10) : -(heater->ambient_temp_cdeg % 10)),
             (unsigned int)(heater->external_tip_temp_cdeg / 10U),
             (unsigned int)(heater->external_tip_temp_cdeg % 10U),
+            (unsigned int)(heater->power_watt_x10 / 10U),
+            (unsigned int)(heater->power_watt_x10 % 10U),
+            (unsigned int)heater->sample_count,
+            (unsigned int)heater->measurement_ready);
+  Debug_Log("status sens cal=%u amb_ok=%u ext_ok=%u ina_init=%u ina_err=%u ina_alert=%u ina_pwr=%umW mcp_init=%u mcp_err=%u mcp_hal=%u max_init=%u max_err=%u max_hal=%u cal_mode=%u cal_target=%u.%uC cal_stable=%u hold=%lums pts=%u\r\n",
             (unsigned int)heater->calibration_valid,
             (unsigned int)heater->ambient_sensor_ready,
             (unsigned int)heater->external_sensor_ready,
+            (unsigned int)ina238->initialized,
+            (unsigned int)ina238->last_error,
+            (unsigned int)ina238->alert_active,
+            (unsigned int)ina238->power_mw,
             (unsigned int)mcp9808->initialized,
             (unsigned int)mcp9808->last_error,
             (unsigned int)mcp9808->last_hal_status,
@@ -1042,11 +1600,7 @@ static void Debug_ReportPeriodicStatus(uint32_t now_ms, uint8_t force)
             (unsigned int)(session->target_temp_cdeg % 10U),
             (unsigned int)session->capture_ready,
             (unsigned long)session->stable_time_ms,
-            (unsigned int)session->stored_point_count,
-            (unsigned int)(heater->power_watt_x10 / 10U),
-            (unsigned int)(heater->power_watt_x10 % 10U),
-            (unsigned int)heater->sample_count,
-            (unsigned int)heater->measurement_ready);
+            (unsigned int)session->stored_point_count);
 }
 
 static const char *Debug_GetStationStateName(StationState state)
@@ -1071,7 +1625,40 @@ static const char *Debug_GetStationStateName(StationState state)
     case STATION_STATE_NO_CALIBRATION:
       return "NO_CAL";
 
+    case STATION_STATE_STANDBY:
+      return "STBY";
+
     case STATION_STATE_FAULT:
+      return "FAULT";
+
+    default:
+      return "UNKNOWN";
+  }
+}
+
+static const char *Debug_GetStationOperatingModeName(StationOperatingMode mode)
+{
+  switch (mode)
+  {
+    case STATION_OPERATING_MODE_IDLE:
+      return "IDLE";
+
+    case STATION_OPERATING_MODE_HEATUP:
+      return "HEATUP";
+
+    case STATION_OPERATING_MODE_HOLD:
+      return "HOLD";
+
+    case STATION_OPERATING_MODE_COOLDOWN:
+      return "COOLDOWN";
+
+    case STATION_OPERATING_MODE_STANDBY:
+      return "STANDBY";
+
+    case STATION_OPERATING_MODE_CALIBRATION:
+      return "CAL";
+
+    case STATION_OPERATING_MODE_FAULT:
       return "FAULT";
 
     default:
@@ -1228,6 +1815,32 @@ static void Debug_FormatWarningFlags(uint32_t warning_flags, char *buffer, size_
   if ((warning_flags & STATION_WARNING_AMBIENT_SENSOR_MISSING) != 0U)
   {
     append_length = snprintf(buffer + written, buffer_size - written, "%sAMBIENT_SENSOR_MISSING", (written > 0U) ? "|" : "");
+    if (append_length > 0)
+    {
+      written += (size_t)append_length;
+      if (written >= buffer_size)
+      {
+        written = buffer_size - 1U;
+      }
+    }
+  }
+
+  if ((warning_flags & STATION_WARNING_INA238_ERROR) != 0U)
+  {
+    append_length = snprintf(buffer + written, buffer_size - written, "%sINA238_ERROR", (written > 0U) ? "|" : "");
+    if (append_length > 0)
+    {
+      written += (size_t)append_length;
+      if (written >= buffer_size)
+      {
+        written = buffer_size - 1U;
+      }
+    }
+  }
+
+  if ((warning_flags & STATION_WARNING_INA238_ALERT) != 0U)
+  {
+    append_length = snprintf(buffer + written, buffer_size - written, "%sINA238_ALERT", (written > 0U) ? "|" : "");
     if (append_length > 0)
     {
       written += (size_t)append_length;
