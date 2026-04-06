@@ -61,8 +61,11 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/app.c
     Core/Src/calibration.c
     Core/Src/heater.c
+    Core/Src/mcp9808.c
     Core/Src/max31856.c
     Core/Src/peripherals.c
+    Core/Src/storage.c
+    Core/Src/ui.c
 )
 
 # Link directories setup

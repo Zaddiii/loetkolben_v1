@@ -7,11 +7,14 @@
 typedef struct
 {
   uint32_t last_update_tick_ms;
+  uint32_t last_init_attempt_tick_ms;
   uint16_t thermocouple_temp_cdeg;
   int16_t cold_junction_temp_cdeg;
   uint8_t fault_flags;
   uint8_t initialized;
   uint8_t data_ready;
+  uint8_t last_error;
+  uint8_t last_hal_status;
 } Max31856Context;
 
 bool Max31856_Init(void);

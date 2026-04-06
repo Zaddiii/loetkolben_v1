@@ -25,11 +25,13 @@ typedef struct
   uint8_t sample_count;
   uint8_t measurement_ready;
   uint8_t calibration_valid;
+  uint8_t ambient_sensor_ready;
   uint8_t external_sensor_ready;
 } HeaterControlContext;
 
 void Heater_Control_Init(void);
 void Heater_Control_Tick(uint32_t now_ms);
+void Heater_Control_SetTargetTempCdeg(uint16_t target_temp_cdeg);
 void Heater_Control_SetPwmPermille(uint16_t pwm_permille);
 void Heater_Control_ForceOff(void);
 const HeaterControlContext *Heater_Control_GetContext(void);

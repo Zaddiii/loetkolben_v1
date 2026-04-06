@@ -2,6 +2,7 @@
 
 #include "calibration.h"
 #include "main.h"
+#include "mcp9808.h"
 #include "max31856.h"
 #include "peripherals.h"
 
@@ -13,6 +14,8 @@ enum
   HEATER_RESTORE_DELAY_US = 8U,
   HEATER_ADC_SAMPLE_COUNT = 8U,
   HEATER_PWM_MAX_PERMILLE = 1000U,
+  HEATER_DEFAULT_TARGET_TEMP_CDEG = 3200U,
+  HEATER_DEFAULT_AMBIENT_TEMP_CDEG = 250U,
   HEATER_SIMULATED_AMBIENT_TEMP_CDEG = 250U,
   HEATER_SIMULATED_TARGET_TEMP_CDEG = 3200U,
   HEATER_SIMULATED_MIN_TEMP_CDEG = 200U,
@@ -25,12 +28,14 @@ static HeaterControlContext heater_context;
 
 static void Heater_ApplyPwm(uint16_t pwm_permille);
 static void Heater_UpdateBuckBoostReference(uint16_t pwm_permille);
+#if !(IRON_VIRTUAL_INTERNAL_ADC || IRON_VIRTUAL_AUX_ADC)
 static uint16_t Heater_ComputePseudoPowerWattX10(uint16_t current_raw, uint16_t voltage_raw);
 static uint16_t Heater_ReadSingleAdcSample(ADC_HandleTypeDef *hadc);
+#endif
 static void Heater_ReadAuxiliaryMeasurements(void);
 static void Heater_UpdateDerivedTelemetry(uint32_t now_ms);
 
-#if IRON_SIMULATION_MODE
+#if IRON_VIRTUAL_INTERNAL_ADC || IRON_VIRTUAL_AUX_ADC
 static uint16_t heater_simulated_raw = 1200U;
 static int16_t heater_simulated_step = 11;
 
@@ -61,7 +66,7 @@ static void Heater_UpdateSimulationModel(void)
   int32_t error_cdeg;
   int32_t next_tip_temp_cdeg;
 
-  heater_context.simulated_target_temp_cdeg = HEATER_SIMULATED_TARGET_TEMP_CDEG;
+  heater_context.simulated_target_temp_cdeg = heater_context.target_temp_cdeg;
   heater_context.simulated_ambient_temp_cdeg = HEATER_SIMULATED_AMBIENT_TEMP_CDEG;
   heater_context.pwm_permille = Heater_SimulatePwmPermilleFromTemperature(
       heater_context.simulated_tip_temp_cdeg,
@@ -101,19 +106,28 @@ static void Heater_UpdateSimulationModel(void)
 
 static void Heater_UpdateDerivedTelemetry(uint32_t now_ms)
 {
+  const Mcp9808Context *ambient_sensor = Mcp9808_GetContext();
+  const Max31856Context *max31856 = Max31856_GetContext();
+#if !(IRON_VIRTUAL_INTERNAL_ADC || IRON_VIRTUAL_AUX_ADC)
   uint16_t tip_temp_cdeg;
-  int16_t ambient_temp_cdeg = HEATER_SIMULATED_AMBIENT_TEMP_CDEG;
+#endif
+  int16_t ambient_temp_cdeg = HEATER_DEFAULT_AMBIENT_TEMP_CDEG;
 
-  heater_context.target_temp_cdeg = HEATER_SIMULATED_TARGET_TEMP_CDEG;
+  if (Mcp9808_Poll(now_ms))
+  {
+    heater_context.ambient_sensor_ready = ambient_sensor->data_ready;
+    ambient_temp_cdeg = ambient_sensor->ambient_temp_cdeg;
+  }
+  else
+  {
+    heater_context.ambient_sensor_ready = 0U;
+  }
 
   if (Max31856_Poll(now_ms))
   {
-    const Max31856Context *max31856 = Max31856_GetContext();
-
     heater_context.external_sensor_ready = max31856->data_ready;
     heater_context.external_tip_temp_cdeg = max31856->thermocouple_temp_cdeg;
     heater_context.external_ambient_temp_cdeg = max31856->cold_junction_temp_cdeg;
-    ambient_temp_cdeg = max31856->cold_junction_temp_cdeg;
   }
   else
   {
@@ -124,7 +138,7 @@ static void Heater_UpdateDerivedTelemetry(uint32_t now_ms)
 
   heater_context.calibration_valid = Calibration_HasValidTable() ? 1U : 0U;
 
-#if IRON_SIMULATION_MODE
+#if IRON_VIRTUAL_INTERNAL_ADC || IRON_VIRTUAL_AUX_ADC
   heater_context.tip_temp_cdeg = heater_context.simulated_tip_temp_cdeg;
   heater_context.ambient_temp_cdeg = heater_context.simulated_ambient_temp_cdeg;
   heater_context.power_watt_x10 = heater_context.simulated_power_watt_x10;
@@ -212,6 +226,7 @@ static void Heater_UpdateBuckBoostReference(uint16_t pwm_permille)
   }
 }
 
+#if !(IRON_VIRTUAL_INTERNAL_ADC || IRON_VIRTUAL_AUX_ADC)
 static uint16_t Heater_ComputePseudoPowerWattX10(uint16_t current_raw, uint16_t voltage_raw)
 {
   uint32_t scaled_power = ((uint32_t)current_raw * (uint32_t)voltage_raw) / 12000U;
@@ -247,10 +262,11 @@ static uint16_t Heater_ReadSingleAdcSample(ADC_HandleTypeDef *hadc)
 
   return (uint16_t)value;
 }
+#endif
 
 static void Heater_ReadAuxiliaryMeasurements(void)
 {
-#if IRON_SIMULATION_MODE
+#if IRON_VIRTUAL_AUX_ADC
   heater_context.heater_current_raw = (uint16_t)(700U + ((uint32_t)heater_context.pwm_permille * 11U) / 10U);
   heater_context.buckboost_voltage_raw = (uint16_t)(2400U + ((uint32_t)heater_context.pwm_permille * 9U) / 10U);
 #else
@@ -279,7 +295,7 @@ static void Heater_ReadAuxiliaryMeasurements(void)
 #endif
 }
 
-#if IRON_SIMULATION_MODE
+#if IRON_VIRTUAL_INTERNAL_ADC
 static void Heater_FillSimulatedSamples(void)
 {
   static const int16_t sample_offsets[HEATER_ADC_SAMPLE_COUNT] = {-9, -5, -2, 0, 2, 4, 7, 11};
@@ -299,7 +315,9 @@ static void Heater_FillSimulatedSamples(void)
 
 static void Heater_PerformMeasurementSequence(void)
 {
+#if !IRON_VIRTUAL_INTERNAL_ADC
   uint8_t index;
+#endif
 
   HAL_GPIO_WritePin(HEATER_EN_GPIO_Port, HEATER_EN_Pin, HEATER_EN_INACTIVE_LEVEL);
   Heater_TimerWaitUs(HEATER_SWITCH_OFF_DELAY_US);
@@ -307,7 +325,7 @@ static void Heater_PerformMeasurementSequence(void)
   HAL_GPIO_WritePin(TIP_CLAMP_GPIO_Port, TIP_CLAMP_Pin, TIP_CLAMP_MEASURE_LEVEL);
   Heater_TimerWaitUs(HEATER_CLAMP_SETTLE_US);
 
-#if IRON_SIMULATION_MODE
+#if IRON_VIRTUAL_INTERNAL_ADC
   Heater_FillSimulatedSamples();
 #else
   for (index = 0; index < HEATER_ADC_SAMPLE_COUNT; ++index)
@@ -338,21 +356,23 @@ void Heater_Control_Init(void)
   heater_context.buckboost_ref_raw = 0U;
   heater_context.pwm_permille = 0U;
   heater_context.tip_temp_cdeg = 0U;
-  heater_context.target_temp_cdeg = HEATER_SIMULATED_TARGET_TEMP_CDEG;
+  heater_context.target_temp_cdeg = HEATER_DEFAULT_TARGET_TEMP_CDEG;
   heater_context.power_watt_x10 = 0U;
   heater_context.external_tip_temp_cdeg = 0U;
   heater_context.simulated_tip_temp_cdeg = HEATER_SIMULATED_AMBIENT_TEMP_CDEG;
   heater_context.simulated_target_temp_cdeg = HEATER_SIMULATED_TARGET_TEMP_CDEG;
   heater_context.simulated_ambient_temp_cdeg = HEATER_SIMULATED_AMBIENT_TEMP_CDEG;
   heater_context.simulated_power_watt_x10 = 0U;
-  heater_context.ambient_temp_cdeg = HEATER_SIMULATED_AMBIENT_TEMP_CDEG;
-  heater_context.external_ambient_temp_cdeg = HEATER_SIMULATED_AMBIENT_TEMP_CDEG;
+  heater_context.ambient_temp_cdeg = HEATER_DEFAULT_AMBIENT_TEMP_CDEG;
+  heater_context.external_ambient_temp_cdeg = HEATER_DEFAULT_AMBIENT_TEMP_CDEG;
   heater_context.sample_count = 0U;
   heater_context.measurement_ready = 0U;
   heater_context.calibration_valid = 0U;
+  heater_context.ambient_sensor_ready = 0U;
   heater_context.external_sensor_ready = 0U;
 
   Calibration_Init();
+  (void)Mcp9808_Init();
   (void)Max31856_Init();
 
   if (HAL_TIM_Base_Start(&htim7) != HAL_OK)
@@ -366,7 +386,7 @@ void Heater_Control_Init(void)
   }
 
   Heater_Control_ForceOff();
-#if IRON_SIMULATION_MODE
+#if IRON_VIRTUAL_INTERNAL_ADC || IRON_VIRTUAL_AUX_ADC
   Heater_Control_SetPwmPermille(IRON_SIMULATION_DEFAULT_PWM_PERMILLE);
 #else
   Heater_ApplyPwm(0U);
@@ -384,6 +404,22 @@ void Heater_Control_Tick(uint32_t now_ms)
 
   heater_context.last_measurement_tick_ms = now_ms;
   Heater_PerformMeasurementSequence();
+}
+
+void Heater_Control_SetTargetTempCdeg(uint16_t target_temp_cdeg)
+{
+  if (target_temp_cdeg < HEATER_SIMULATED_MIN_TEMP_CDEG)
+  {
+    target_temp_cdeg = HEATER_SIMULATED_MIN_TEMP_CDEG;
+  }
+
+  if (target_temp_cdeg > HEATER_SIMULATED_MAX_TEMP_CDEG)
+  {
+    target_temp_cdeg = HEATER_SIMULATED_MAX_TEMP_CDEG;
+  }
+
+  heater_context.target_temp_cdeg = target_temp_cdeg;
+  heater_context.simulated_target_temp_cdeg = target_temp_cdeg;
 }
 
 void Heater_Control_SetPwmPermille(uint16_t pwm_permille)

@@ -160,6 +160,7 @@ Danach wurde das Scaffold bereits weiter in Richtung Zielhardware umgebaut:
 Wichtig dabei:
 
 - die derzeit hinterlegten sicheren Ausgangspegel sind Annahmen und muessen gegen die reale Hardwarepolaritaet geprueft werden, bevor der Heizpfad aktiv getestet wird
+- der Messpfad ist jetzt fuer das Bring-up auf reale ADC- und I2C-Sensordaten umgestellt; der Heizpfad bleibt dabei weiterhin gesperrt
 
 Aktuell bereits als Grundperipherie vorbereitet:
 
@@ -181,16 +182,120 @@ Zusätzlich ist jetzt bereits ein erstes Messfenster-Grundgeruest vorhanden:
 - Clamp-Umschaltung fuer das Messfenster
 - 8-fach-ADC-Abtastung des internen Thermoelements
 - robuste Mittelung mit Verwerfen von Minimum und Maximum
+- MCP9808-Grundtreiber fuer die Cold-Junction-Kompensation im Bring-up
+- MAX31856 bleibt als externer Referenzpfad fuer die Kalibrierung angebunden
 
 Wichtig:
 
 - der PWM-Timer fuer den Heizer laeuft zwar bereits als Grundstruktur
 - der Leistungspfad bleibt im aktuellen Stand aber bewusst gesperrt
 - es wird also noch keine echte Heizfreigabe vorgenommen
-- die ADC-/DAC-/SPI-HAL-Module sind im aktuellen Workspace noch nicht lokal vorhanden und daher fuer einen stabilen Build vorlaeufig wieder aus dem Iron-Target herausgenommen
-- der Messpfad liefert bis zur Nachruestung dieser Treiber deshalb aktuell Dummy-Rohwerte statt echter ADC-Daten
+- ohne gueltige Kalibrierdaten bleibt die Station bewusst im Zustand `NO_CALIBRATION`
+- wenn MCP9808 oder MAX31856 im Nucleo-Aufbau noch nicht angeschlossen sind, faellt die Firmware fuer diese Pfade auf sichere Bring-up-Werte bzw. `not ready` zurueck
+- fuer das Bring-up gibt es jetzt bereits einen einfachen Kalibrierablauf ueber den USER-Button und die USART3-Debugausgabe
+- zusaetzlich gibt es jetzt ein explizites Bring-up-Profil-System; aktuell ist standardmaessig ein sensorloses Profil aktiv, damit die Firmware auch ohne angeschlossene Sensorik sinnvoll weiterentwickelt und getestet werden kann
 
 Das ist Absicht, damit zuerst die Mess- und Sicherheitsbasis ohne Risiko steht.
+
+### Aktueller Bring-up-Kalibrierpfad
+
+Der Kalibrierpfad ist noch kein finales UI, aber bereits funktional testbar:
+
+- neuer Zustand `CALIBRATION` in der zentralen Zustandsmaschine
+- Start einer Kalibriersitzung per kurzer USER-Button-Betaetigung
+- der aktuelle Kaltpunkt wird dabei sofort als erster LUT-Punkt uebernommen
+- danach werden die Soll-Stuetzpunkte 100, 150, 200, 250, 300, 350 und 400 Grad C nacheinander verfolgt
+- die Stabilitaetspruefung orientiert sich bereits an der Anforderung: 2 s Haltezeit innerhalb von +-2 Grad C um den aktuellen Zielpunkt
+- ein kurzer USER-Button-Druck uebernimmt einen stabilen Punkt
+- ein langer USER-Button-Druck finalisiert die Sitzung, sobald mindestens 3 gueltige Punkte vorliegen
+
+Wichtig fuer den Testaufbau:
+
+- die Regelung waehrend der Kalibrierung ist noch nicht aktiv, weil der Heizpfad absichtlich weiter gesperrt bleibt
+- der aktuelle Ablauf ist deshalb ein Bring-up-Werkzeug fuer Sensorik, LUT-Pfad und Zustandsmaschine
+- stabile Temperaturpunkte muessen im Nucleo-Aufbau derzeit extern erzeugt werden, falls der Pfad praktisch durchgetestet werden soll
+
+### Aktuelle Bring-up-Profile
+
+Im Moment gibt es zwei einfache Profile in `iron_cm7/Core/Inc/main.h`:
+
+- `IRON_BRINGUP_PROFILE_SENSORLESS`: virtuelle Sensorik und virtuelle Kalibrierdaten fuer Weiterentwicklung ohne angeschlossene Sensoren
+- `IRON_BRINGUP_PROFILE_REAL_SENSORS`: reale ADC-, I2C- und SPI-Sensorpfade fuer spaetere Hardwareintegration
+
+Aktueller Default:
+
+- `IRON_BRINGUP_PROFILE_SENSORLESS`
+
+Das ist fuer den aktuellen Nucleo-Stand absichtlich praktischer, weil damit Zustandsmaschine, Debugausgabe und weitere Firmware-Bausteine nicht an fehlender Sensorhardware haengen.
+
+### Aktueller Storage-Stand
+
+Die geforderten persistenten Daten haben jetzt ein erstes technisches Grundgeruest:
+
+- eigener Storage-Layer in `iron_cm7/Core/Src/storage.c`
+- CRC-gesichertes Datenformat mit Versionskennung
+- reservierter Flash-Bereich im letzten 128-KB-Sektor des CM7-Flash-Banks
+- Laden der letzten Solltemperatur beim Boot
+- Speichern der Solltemperatur bei `target <degC>` ueber die UART-Konsole
+- Speichern der Kalibriertabelle nach erfolgreichem Abschluss einer Kalibriersitzung
+
+Wichtig:
+
+- das Linkerscript reserviert dafuer jetzt den oberen Flash-Bereich; der eigentliche Anwendungscode nutzt dadurch bewusst nur noch 896 KB statt 1024 KB
+- fuer V1 ist das voellig ausreichend, weil das aktuelle Iron-Image deutlich kleiner ist
+- Wear-Leveling gibt es in diesem ersten Schritt noch nicht; fuer Bring-up und V1 ist das akzeptabel, haeufiges permanentes Umspeichern per Skript sollte man aber vermeiden
+
+### Aktuelle UART-Bedienung fuer Bring-up
+
+Solange weder Encoder noch Display aktiv genutzt werden, gibt es jetzt eine kleine Textkonsole auf USART3:
+
+- `help`: listet die verfuegbaren Kommandos
+- `status`: gibt sofort eine Statuszeile aus
+- `stream`: zeigt den aktuellen Streaming-Status der periodischen Statusausgabe
+- `stream on` / `stream off`: schaltet die periodische Statusausgabe gezielt ein oder aus
+- `stream <ms>`: aktiviert periodische Statusausgabe mit frei waehlbarem Intervall ab 100 ms
+- `profile`: zeigt das aktive Bring-up-Profil und die virtuellen Teilpfade
+- `target`: zeigt die aktuelle Solltemperatur
+- `target <degC>`: setzt die Solltemperatur fuer den aktuellen Lauf
+- `storage`: zeigt den aktuellen Persistenzstatus, CRC und die geladenen Daten
+- `fault`: zeigt aktive Fehlerursachen, gelatchte Fehler, Warnungen und Quittierstatus
+- `fault ack`: quittiert gelatchte Fehler, falls keine Fehlerursache mehr anliegt; injizierte Testfehler werden dabei mit entfernt
+- `fault inject`: setzt gezielt einen Testfehler fuer Bring-up und Fault-Pfad-Tests
+- `ui`: zeigt den aktuellen UI-Grundzustand, Menuepunkt und Pending-Speicherstatus
+
+Damit kann die simulierte Stationslogik auch ohne finale UI bereits sinnvoll durchgetestet werden.
+
+Wichtig fuer die Bedienbarkeit:
+
+- die periodische Statusausgabe ist jetzt standardmaessig ausgeschaltet, damit Eingaben auf der UART-Konsole nicht von Dauerlogs ueberrollt werden
+- Einzelabfragen laufen ueber `status`
+- Dauerstreaming fuer Inbetriebnahme kann bei Bedarf gezielt mit `stream on` oder `stream 500` aktiviert werden
+- weil im aktuellen Testaufbau weder Encoder noch Display real angeschlossen sind, bleibt USART3 vorerst bewusst die primaere Bedien- und Diagnoseoberflaeche
+
+Zusätzlich ist die zentrale Fault-Logik jetzt naeher an der Produktspezifikation:
+
+- aktive Fehlerursachen und gelatchte Fehler werden getrennt verfolgt
+- ein Fehler verschwindet nicht mehr automatisch nur weil die Ursache kurz weg ist, sondern bleibt bis zur Quittierung sichtbar
+- Quittierung ist nur erfolgreich, wenn keine aktive Fehlerursache mehr anliegt
+- Warnungen fuer den MCP9808-Pfad werden separat von harten Fehlern gefuehrt
+- als harte softwareseitige Grenzwerte sind aktuell Spitzentemperatur ueber 450 Grad C, Umgebung ueber 80 Grad C und ein dauerhaft fehlender MCP9808-Pfad vorbereitet
+
+### Aktueller Encoder-/Menue-Stand
+
+Zusätzlich zur UART-Konsole gibt es jetzt ein erstes UI-Grundgeruest fuer den echten Drehencoder:
+
+- TIM5 wird als Encoderquelle beim Start aktiviert
+- in der Hauptansicht aendert Drehen die Solltemperatur in 5-Grad-C-Schritten
+- der Sollwert wird nicht bei jedem Rastschritt sofort geschrieben, sondern zeitverzoegert gespeichert
+- kurzer Druck auf den Encoder-Taster oeffnet ein kleines Bring-up-Menue
+- aktuelles Menue: `START_CAL`, `STREAM`, `EXIT`
+- langer Druck auf den Encoder-Taster fordert im Fault-Zustand eine Fehlerquittierung fuer injizierte Fehler an
+
+Wichtig:
+
+- das ist noch kein finales Display-Menue, sondern ein Bedienkern fuer die weitere Firmwareentwicklung
+- die sichtbare Rueckmeldung laeuft derzeit weiter ueber USART3-Diagnoseausgaben und den `ui`-Befehl
+- im aktuellen Nucleo-Testaufbau ohne realen Encoder und ohne Display ist dieses UI-Grundgeruest deshalb nur vorbereitend vorhanden und nicht der primaere Bedienpfad
 
 Bewusst noch nicht im ersten Schritt verdrahtet:
 

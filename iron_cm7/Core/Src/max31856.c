@@ -17,10 +17,58 @@ enum
   MAX31856_CR0_AUTOCONVERT = 0x80U,
   MAX31856_CR0_50HZ_FILTER = 0x01U,
   MAX31856_CR1_TYPE_K = 0x03U,
+  MAX31856_RETRY_PERIOD_MS = 1000U,
   MAX31856_POLL_PERIOD_MS = 100U
 };
 
+enum
+{
+  MAX31856_ERROR_NONE = 0U,
+  MAX31856_ERROR_WRITE_CR0 = 1U,
+  MAX31856_ERROR_WRITE_CR1 = 2U,
+  MAX31856_ERROR_WRITE_MASK = 3U,
+  MAX31856_ERROR_READ_THERMOCOUPLE = 4U,
+  MAX31856_ERROR_READ_COLD_JUNCTION = 5U,
+  MAX31856_ERROR_READ_STATUS = 6U,
+  MAX31856_ERROR_NOT_INITIALIZED = 7U
+};
+
 static Max31856Context max31856_context;
+
+static HAL_StatusTypeDef Max31856_WriteRegister(uint8_t reg, uint8_t value);
+static bool Max31856_Configure(void)
+{
+  max31856_context.last_hal_status = (uint8_t)HAL_OK;
+
+  if (Max31856_WriteRegister(MAX31856_REG_CR0, MAX31856_CR0_AUTOCONVERT | MAX31856_CR0_50HZ_FILTER) != HAL_OK)
+  {
+    max31856_context.initialized = 0U;
+    max31856_context.last_error = MAX31856_ERROR_WRITE_CR0;
+    max31856_context.last_hal_status = (uint8_t)hspi1.ErrorCode;
+    return false;
+  }
+
+  if (Max31856_WriteRegister(MAX31856_REG_CR1, MAX31856_CR1_TYPE_K) != HAL_OK)
+  {
+    max31856_context.initialized = 0U;
+    max31856_context.last_error = MAX31856_ERROR_WRITE_CR1;
+    max31856_context.last_hal_status = (uint8_t)hspi1.ErrorCode;
+    return false;
+  }
+
+  if (Max31856_WriteRegister(MAX31856_REG_MASK, 0x00U) != HAL_OK)
+  {
+    max31856_context.initialized = 0U;
+    max31856_context.last_error = MAX31856_ERROR_WRITE_MASK;
+    max31856_context.last_hal_status = (uint8_t)hspi1.ErrorCode;
+    return false;
+  }
+
+  max31856_context.initialized = 1U;
+  max31856_context.last_error = MAX31856_ERROR_NONE;
+  max31856_context.last_hal_status = (uint8_t)HAL_OK;
+  return true;
+}
 
 static HAL_StatusTypeDef Max31856_WriteRegister(uint8_t reg, uint8_t value)
 {
@@ -76,43 +124,28 @@ static int32_t Max31856_DecodeThermocoupleCdeg(const uint8_t *raw_data)
 bool Max31856_Init(void)
 {
   max31856_context.last_update_tick_ms = 0U;
+  max31856_context.last_init_attempt_tick_ms = HAL_GetTick();
   max31856_context.thermocouple_temp_cdeg = 0U;
   max31856_context.cold_junction_temp_cdeg = 250;
   max31856_context.fault_flags = 0U;
+  max31856_context.last_error = MAX31856_ERROR_NOT_INITIALIZED;
+  max31856_context.last_hal_status = 0U;
   max31856_context.data_ready = 0U;
 
-#if IRON_SIMULATION_MODE
+#if IRON_VIRTUAL_MAX31856
   max31856_context.initialized = 1U;
   max31856_context.data_ready = 1U;
   max31856_context.thermocouple_temp_cdeg = 3200U;
+  max31856_context.last_error = MAX31856_ERROR_NONE;
   return true;
 #else
-  if (Max31856_WriteRegister(MAX31856_REG_CR0, MAX31856_CR0_AUTOCONVERT | MAX31856_CR0_50HZ_FILTER) != HAL_OK)
-  {
-    max31856_context.initialized = 0U;
-    return false;
-  }
-
-  if (Max31856_WriteRegister(MAX31856_REG_CR1, MAX31856_CR1_TYPE_K) != HAL_OK)
-  {
-    max31856_context.initialized = 0U;
-    return false;
-  }
-
-  if (Max31856_WriteRegister(MAX31856_REG_MASK, 0x00U) != HAL_OK)
-  {
-    max31856_context.initialized = 0U;
-    return false;
-  }
-
-  max31856_context.initialized = 1U;
-  return true;
+  return Max31856_Configure();
 #endif
 }
 
 bool Max31856_Poll(uint32_t now_ms)
 {
-#if IRON_SIMULATION_MODE
+#if IRON_VIRTUAL_MAX31856
   max31856_context.last_update_tick_ms = now_ms;
   max31856_context.data_ready = 1U;
   max31856_context.fault_flags = 0U;
@@ -124,6 +157,13 @@ bool Max31856_Poll(uint32_t now_ms)
 
   if (max31856_context.initialized == 0U)
   {
+    if ((now_ms - max31856_context.last_init_attempt_tick_ms) >= MAX31856_RETRY_PERIOD_MS)
+    {
+      max31856_context.last_init_attempt_tick_ms = now_ms;
+      (void)Max31856_Configure();
+    }
+
+    max31856_context.last_error = MAX31856_ERROR_NOT_INITIALIZED;
     return false;
   }
 
@@ -134,16 +174,25 @@ bool Max31856_Poll(uint32_t now_ms)
 
   if (Max31856_ReadRegisters(MAX31856_REG_LTCBH, thermocouple_regs, sizeof(thermocouple_regs)) != HAL_OK)
   {
+    max31856_context.initialized = 0U;
+    max31856_context.last_error = MAX31856_ERROR_READ_THERMOCOUPLE;
+    max31856_context.last_hal_status = (uint8_t)hspi1.ErrorCode;
     return false;
   }
 
   if (Max31856_ReadRegisters(MAX31856_REG_CJTH, cold_junction_regs, sizeof(cold_junction_regs)) != HAL_OK)
   {
+    max31856_context.initialized = 0U;
+    max31856_context.last_error = MAX31856_ERROR_READ_COLD_JUNCTION;
+    max31856_context.last_hal_status = (uint8_t)hspi1.ErrorCode;
     return false;
   }
 
   if (Max31856_ReadRegisters(MAX31856_REG_SR, &status_reg, 1U) != HAL_OK)
   {
+    max31856_context.initialized = 0U;
+    max31856_context.last_error = MAX31856_ERROR_READ_STATUS;
+    max31856_context.last_hal_status = (uint8_t)hspi1.ErrorCode;
     return false;
   }
 
@@ -152,6 +201,8 @@ bool Max31856_Poll(uint32_t now_ms)
   max31856_context.cold_junction_temp_cdeg = Max31856_DecodeColdJunctionCdeg(cold_junction_regs);
   max31856_context.fault_flags = status_reg;
   max31856_context.data_ready = 1U;
+  max31856_context.last_error = MAX31856_ERROR_NONE;
+  max31856_context.last_hal_status = (uint8_t)HAL_OK;
   return true;
 #endif
 }
