@@ -13,12 +13,24 @@
 
 enum
 {
-  DISPLAY_REFRESH_PERIOD_MS = 150U,
-  DISPLAY_HW_RETRY_PERIOD_MS = 2000U
+  DISPLAY_REFRESH_PERIOD_MS = 16U,
+  DISPLAY_HW_RETRY_PERIOD_MS = 5000U,
+  DISPLAY_MAIN_TIP_UPDATE_MS = 120U,
+  DISPLAY_MAIN_SET_UPDATE_MS = 250U,
+  DISPLAY_COLOR_BLACK = 0x0000U,
+  DISPLAY_COLOR_HEADER_BLUE = 0x001F,
+  DISPLAY_COLOR_HEADER_TEXT = 0xFD20U,
+  DISPLAY_COLOR_TIP_TEXT = 0xFFFFU,
+  DISPLAY_COLOR_SET_TEXT = 0x07FFU
 };
 
 static DisplayContext display_context;
 static uint32_t display_last_hw_init_attempt_ms;
+static uint32_t display_last_tip_draw_ms;
+static uint32_t display_last_set_draw_ms;
+static uint8_t display_main_layout_drawn;
+static int16_t display_tip_shown_deg;
+static int16_t display_set_shown_deg;
 
 static const char *Display_GetOperatingModeName(StationOperatingMode mode)
 {
@@ -59,20 +71,14 @@ const char *Display_GetPageName(DisplayPage page)
 {
   switch (page)
   {
-    case DISPLAY_PAGE_OVERVIEW:
-      return "OVERVIEW";
-
-    case DISPLAY_PAGE_THERMAL:
-      return "THERMAL";
-
-    case DISPLAY_PAGE_CONTROL:
-      return "CONTROL";
+    case DISPLAY_PAGE_MAIN:
+      return "MAIN";
 
     case DISPLAY_PAGE_CALIBRATION:
       return "CAL";
 
     default:
-      return "UNKNOWN";
+      return "UNK";
   }
 }
 
@@ -83,7 +89,7 @@ static uint8_t Display_SetLine(uint8_t index, const char *text)
     return 0U;
   }
 
-  if (strncmp(display_context.lines[index], text, DISPLAY_LINE_LENGTH) == 0)
+  if (display_context.lines[index][0] != '\0' && strncmp(display_context.lines[index], text, DISPLAY_LINE_LENGTH - 1U) == 0)
   {
     return 0U;
   }
@@ -95,20 +101,23 @@ static uint8_t Display_SetLine(uint8_t index, const char *text)
 void Display_Init(void)
 {
   memset(&display_context, 0, sizeof(display_context));
-  display_context.page = DISPLAY_PAGE_OVERVIEW;
+  display_context.page = DISPLAY_PAGE_MAIN;
   display_last_hw_init_attempt_ms = HAL_GetTick();
+  display_last_tip_draw_ms = 0U;
+  display_last_set_draw_ms = 0U;
+  display_main_layout_drawn = 0U;
+  display_tip_shown_deg = -32768;
+  display_set_shown_deg = -32768;
   (void)St7789_Init();
 }
 
 void Display_Tick(uint32_t now_ms)
 {
-  const StationContext *station = Station_App_GetContext();
   const HeaterControlContext *heater = Heater_Control_GetContext();
-  const FanContext *fan = Fan_GetContext();
   const UiContext *ui = Ui_GetContext();
   const CalibrationSessionContext *session = Calibration_GetSessionContext();
   char line_buffer[DISPLAY_LINE_LENGTH];
-  uint8_t changed = 0U;
+  uint8_t changed_mask = 0U;
 
   if ((now_ms - display_context.last_refresh_ms) < DISPLAY_REFRESH_PERIOD_MS)
   {
@@ -117,7 +126,6 @@ void Display_Tick(uint32_t now_ms)
       display_last_hw_init_attempt_ms = now_ms;
       (void)St7789_Init();
     }
-
     return;
   }
 
@@ -129,145 +137,122 @@ void Display_Tick(uint32_t now_ms)
     (void)St7789_Init();
   }
 
-  if (station->fault_flags != 0U)
+  if ((DisplayPage)display_context.page == DISPLAY_PAGE_MAIN || ui->screen == UI_SCREEN_MAIN)
   {
-    (void)snprintf(line_buffer, sizeof(line_buffer), "FAULT %s", Display_GetOperatingModeName(station->operating_mode));
-    changed |= Display_SetLine(0U, line_buffer);
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "TIP %u.%uC FAN %u%%",
-                   (unsigned int)(heater->tip_temp_cdeg / 10U),
-                   (unsigned int)(heater->tip_temp_cdeg % 10U),
-                   (unsigned int)(fan->pwm_permille / 10U));
-    changed |= Display_SetLine(1U, line_buffer);
-    (void)snprintf(line_buffer, sizeof(line_buffer), "LAT %08lX", station->fault_flags);
-    changed |= Display_SetLine(2U, line_buffer);
-    (void)snprintf(line_buffer, sizeof(line_buffer), "ACT %08lX", station->active_fault_flags);
-    changed |= Display_SetLine(3U, line_buffer);
+    if (ui->screen == UI_SCREEN_MENU)
+    {
+      display_main_layout_drawn = 0U;
+      (void)snprintf(line_buffer, sizeof(line_buffer), "MENU");
+      if (Display_SetLine(0U, line_buffer) != 0U)
+      {
+        changed_mask |= (uint8_t)(1U << 0U);
+      }
+      (void)snprintf(line_buffer, sizeof(line_buffer), "%s", Ui_GetMenuItemName((UiMenuItem)ui->selected_menu_item));
+      if (Display_SetLine(1U, line_buffer) != 0U)
+      {
+        changed_mask |= (uint8_t)(1U << 1U);
+      }
+      (void)snprintf(line_buffer, sizeof(line_buffer), "");
+      if (Display_SetLine(2U, line_buffer) != 0U)
+      {
+        changed_mask |= (uint8_t)(1U << 2U);
+      }
+      (void)snprintf(line_buffer, sizeof(line_buffer), "");
+      if (Display_SetLine(3U, line_buffer) != 0U)
+      {
+        changed_mask |= (uint8_t)(1U << 3U);
+      }
+    }
+    else
+    {
+      int16_t tip_actual_deg = (int16_t)(heater->tip_temp_cdeg / 10U);
+      int16_t set_actual_deg = (int16_t)(ui->target_temp_cdeg / 10U);
+      uint8_t tip_due = 0U;
+      uint8_t set_due = 0U;
+
+      if ((display_main_layout_drawn == 0U) && (St7789_GetContext()->initialized != 0U))
+      {
+        (void)St7789_ClearArea(0U, 0U, 320U, 170U, DISPLAY_COLOR_BLACK);
+        (void)St7789_ClearArea(0U, 0U, 320U, 28U, DISPLAY_COLOR_HEADER_BLUE);
+        (void)St7789_DrawText(12U, 8U, "SOLDERING IRON", DISPLAY_COLOR_HEADER_TEXT, DISPLAY_COLOR_HEADER_BLUE, 2U);
+        display_main_layout_drawn = 1U;
+        display_tip_shown_deg = -32768;
+        display_set_shown_deg = -32768;
+        display_last_tip_draw_ms = 0U;
+        display_last_set_draw_ms = 0U;
+      }
+
+      if (display_tip_shown_deg == -32768)
+      {
+        display_tip_shown_deg = tip_actual_deg;
+      }
+
+      if ((now_ms - display_last_tip_draw_ms) >= DISPLAY_MAIN_TIP_UPDATE_MS)
+      {
+        display_last_tip_draw_ms = now_ms;
+        tip_due = 1U;
+
+        if (tip_actual_deg > display_tip_shown_deg)
+        {
+          display_tip_shown_deg++;
+        }
+        else if (tip_actual_deg < display_tip_shown_deg)
+        {
+          display_tip_shown_deg--;
+        }
+      }
+
+      if (((now_ms - display_last_set_draw_ms) >= DISPLAY_MAIN_SET_UPDATE_MS) || (set_actual_deg != display_set_shown_deg))
+      {
+        display_last_set_draw_ms = now_ms;
+        display_set_shown_deg = set_actual_deg;
+        set_due = 1U;
+      }
+
+      if ((St7789_GetContext()->initialized != 0U) && (tip_due != 0U))
+      {
+        (void)St7789_ClearArea(8U, 42U, 304U, 66U, DISPLAY_COLOR_BLACK);
+        (void)snprintf(line_buffer, sizeof(line_buffer), "%dC", (int)display_tip_shown_deg);
+        (void)St7789_DrawText(28U, 52U, line_buffer, DISPLAY_COLOR_TIP_TEXT, DISPLAY_COLOR_BLACK, 6U);
+      }
+
+      if ((St7789_GetContext()->initialized != 0U) && (set_due != 0U))
+      {
+        (void)St7789_ClearArea(8U, 118U, 304U, 38U, DISPLAY_COLOR_BLACK);
+        (void)snprintf(line_buffer, sizeof(line_buffer), "SET %dC", (int)display_set_shown_deg);
+        (void)St7789_DrawText(18U, 124U, line_buffer, DISPLAY_COLOR_SET_TEXT, DISPLAY_COLOR_BLACK, 3U);
+      }
+
+      display_context.version++;
+      return;
+    }
   }
-  else if ((DisplayPage)display_context.page == DISPLAY_PAGE_THERMAL)
+  else if ((DisplayPage)display_context.page == DISPLAY_PAGE_CALIBRATION || session->active != 0U)
   {
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "THERM %s %s",
-                   Display_GetScreenName(ui->screen),
-                   station->docked ? "DOCK" : "RUN");
-    changed |= Display_SetLine(0U, line_buffer);
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "TIP %u.%u AMB %d.%d",
-                   (unsigned int)(heater->tip_temp_cdeg / 10U),
-                   (unsigned int)(heater->tip_temp_cdeg % 10U),
-                   (int)(heater->ambient_temp_cdeg / 10),
-                   (int)((heater->ambient_temp_cdeg >= 0) ? (heater->ambient_temp_cdeg % 10) : -(heater->ambient_temp_cdeg % 10)));
-    changed |= Display_SetLine(1U, line_buffer);
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "EXT %u.%u RAW %u",
-                   (unsigned int)(heater->external_tip_temp_cdeg / 10U),
-                   (unsigned int)(heater->external_tip_temp_cdeg % 10U),
-                   (unsigned int)heater->filtered_raw);
-    changed |= Display_SetLine(2U, line_buffer);
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "PWR %u.%uW PWM %u",
-                   (unsigned int)(heater->power_watt_x10 / 10U),
-                   (unsigned int)(heater->power_watt_x10 % 10U),
-                   (unsigned int)heater->pwm_permille);
-    changed |= Display_SetLine(3U, line_buffer);
-  }
-  else if ((DisplayPage)display_context.page == DISPLAY_PAGE_CONTROL)
-  {
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "CTRL %s %s",
-                   Display_GetOperatingModeName(station->operating_mode),
-                   station->standby_active ? "STBY" : "LIVE");
-    changed |= Display_SetLine(0U, line_buffer);
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "SET %u.%u EFF %u.%u",
-                   (unsigned int)(heater->target_temp_cdeg / 10U),
-                   (unsigned int)(heater->target_temp_cdeg % 10U),
-                   (unsigned int)(heater->effective_target_temp_cdeg / 10U),
-                   (unsigned int)(heater->effective_target_temp_cdeg % 10U));
-    changed |= Display_SetLine(1U, line_buffer);
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "FAN %u%% RPM %u",
-                   (unsigned int)(fan->pwm_permille / 10U),
-                   (unsigned int)fan->tach_rpm);
-    changed |= Display_SetLine(2U, line_buffer);
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "LOAD %u.%u REQ %u",
-                   (unsigned int)(heater->simulated_thermal_load_permille / 10U),
-                   (unsigned int)(heater->simulated_thermal_load_permille % 10U),
-                   (unsigned int)heater->simulated_requested_pwm_permille);
-    changed |= Display_SetLine(3U, line_buffer);
-  }
-  else if (((DisplayPage)display_context.page == DISPLAY_PAGE_CALIBRATION) || (session->active != 0U))
-  {
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "CAL %s %uPTS",
-                   session->active ? "ACTIVE" : "TABLE",
-                   (unsigned int)(session->active ? session->stored_point_count : Calibration_GetActiveTable()->point_count));
-    changed |= Display_SetLine(0U, line_buffer);
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "VALID %u NEXT %u.%u",
-                   (unsigned int)Calibration_HasValidTable(),
-                   (unsigned int)(session->target_temp_cdeg / 10U),
-                   (unsigned int)(session->target_temp_cdeg % 10U));
-    changed |= Display_SetLine(1U, line_buffer);
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "HOLD %lums CAP %u",
-                   (unsigned long)session->stable_time_ms,
-                   (unsigned int)session->capture_ready);
-    changed |= Display_SetLine(2U, line_buffer);
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "EXT %u.%u RAW %u",
-                   (unsigned int)(session->averaged_external_tip_temp_cdeg / 10U),
-                   (unsigned int)(session->averaged_external_tip_temp_cdeg % 10U),
-                   (unsigned int)session->averaged_internal_raw);
-    changed |= Display_SetLine(3U, line_buffer);
-  }
-  else
-  {
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "%s %s %s",
-                   Display_GetScreenName(ui->screen),
-                   Display_GetOperatingModeName(station->operating_mode),
-                   station->docked ? "DOCK" : "RUN");
-    changed |= Display_SetLine(0U, line_buffer);
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "TIP %u.%uC EFF %u.%uC",
-                   (unsigned int)(heater->tip_temp_cdeg / 10U),
-                   (unsigned int)(heater->tip_temp_cdeg % 10U),
-                   (unsigned int)(heater->effective_target_temp_cdeg / 10U),
-                   (unsigned int)(heater->effective_target_temp_cdeg % 10U));
-    changed |= Display_SetLine(1U, line_buffer);
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "SET %u.%u FAN %u%%",
-                   (unsigned int)(heater->target_temp_cdeg / 10U),
-                   (unsigned int)(heater->target_temp_cdeg % 10U),
-                   (unsigned int)(fan->pwm_permille / 10U));
-    changed |= Display_SetLine(2U, line_buffer);
-    (void)snprintf(line_buffer,
-                   sizeof(line_buffer),
-                   "%s %s",
-                   Ui_GetMenuItemName((UiMenuItem)ui->selected_menu_item),
-                   fan->cooling_request ? "COOL" : "OK");
-    changed |= Display_SetLine(3U, line_buffer);
+    display_main_layout_drawn = 0U;
+    (void)snprintf(line_buffer, sizeof(line_buffer), "CALIBRATION");
+    if (Display_SetLine(0U, line_buffer) != 0U)
+    {
+      changed_mask |= (uint8_t)(1U << 0U);
+    }
+    (void)snprintf(line_buffer, sizeof(line_buffer), "NEXT %u.%uC", (unsigned int)(session->target_temp_cdeg / 10U), (unsigned int)(session->target_temp_cdeg % 10U));
+    if (Display_SetLine(1U, line_buffer) != 0U)
+    {
+      changed_mask |= (uint8_t)(1U << 1U);
+    }
+    (void)snprintf(line_buffer, sizeof(line_buffer), "HOLD %lums", (unsigned long)session->stable_time_ms);
+    if (Display_SetLine(2U, line_buffer) != 0U)
+    {
+      changed_mask |= (uint8_t)(1U << 2U);
+    }
+    (void)snprintf(line_buffer, sizeof(line_buffer), "%u POINTS", (unsigned int)(session->active ? session->stored_point_count : Calibration_GetActiveTable()->point_count));
+    if (Display_SetLine(3U, line_buffer) != 0U)
+    {
+      changed_mask |= (uint8_t)(1U << 3U);
+    }
   }
 
-  if (changed != 0U)
+  if (changed_mask != 0U)
   {
     if (St7789_GetContext()->initialized != 0U)
     {
@@ -275,7 +260,10 @@ void Display_Tick(uint32_t now_ms)
 
       for (line_index = 0U; line_index < DISPLAY_LINE_COUNT; ++line_index)
       {
-        (void)St7789_DrawTextLine(line_index, display_context.lines[line_index]);
+        if ((changed_mask & (uint8_t)(1U << line_index)) != 0U)
+        {
+          (void)St7789_DrawTextLine(line_index, display_context.lines[line_index]);
+        }
       }
     }
 

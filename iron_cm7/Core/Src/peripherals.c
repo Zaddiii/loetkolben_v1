@@ -258,6 +258,16 @@ static void MX_I2C3_Init(void)
 
 static void MX_SPI1_Init(void)
 {
+  RCC_PeriphCLKInitTypeDef peripheral_clock_init = {0};
+
+  peripheral_clock_init.PeriphClockSelection = RCC_PERIPHCLK_SPI123;
+  peripheral_clock_init.Spi123ClockSelection = RCC_SPI123CLKSOURCE_CLKP;
+
+  if (HAL_RCCEx_PeriphCLKConfig(&peripheral_clock_init) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_MASTER;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
@@ -290,6 +300,16 @@ static void MX_SPI1_Init(void)
 
 static void MX_SPI2_Init(void)
 {
+  RCC_PeriphCLKInitTypeDef peripheral_clock_init = {0};
+
+  peripheral_clock_init.PeriphClockSelection = RCC_PERIPHCLK_SPI123;
+  peripheral_clock_init.Spi123ClockSelection = RCC_SPI123CLKSOURCE_CLKP;
+
+  if (HAL_RCCEx_PeriphCLKConfig(&peripheral_clock_init) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
   hspi2.Instance = SPI2;
   hspi2.Init.Mode = SPI_MODE_MASTER;
   hspi2.Init.Direction = SPI_DIRECTION_2LINES;
@@ -405,7 +425,7 @@ static void MX_TIM5_Init(void)
   TIM_Encoder_InitTypeDef encoder_config = {0};
   TIM_MasterConfigTypeDef master_config = {0};
 
-  htim5.Instance = TIM5;
+  htim5.Instance = TIM8;
   htim5.Init.Prescaler = 0;
   htim5.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim5.Init.Period = 0xFFFF;
@@ -416,11 +436,11 @@ static void MX_TIM5_Init(void)
   encoder_config.IC1Polarity = TIM_ICPOLARITY_RISING;
   encoder_config.IC1Selection = TIM_ICSELECTION_DIRECTTI;
   encoder_config.IC1Prescaler = TIM_ICPSC_DIV1;
-  encoder_config.IC1Filter = 4;
+  encoder_config.IC1Filter = 10;
   encoder_config.IC2Polarity = TIM_ICPOLARITY_RISING;
   encoder_config.IC2Selection = TIM_ICSELECTION_DIRECTTI;
   encoder_config.IC2Prescaler = TIM_ICPSC_DIV1;
-  encoder_config.IC2Filter = 4;
+  encoder_config.IC2Filter = 10;
 
   if (HAL_TIM_Encoder_Init(&htim5, &encoder_config) != HAL_OK)
   {

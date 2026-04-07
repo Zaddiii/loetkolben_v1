@@ -9,10 +9,10 @@
 
 enum
 {
-  ST7789_WIDTH = 240U,
-  ST7789_HEIGHT = 240U,
+  ST7789_WIDTH = 320U,
+  ST7789_HEIGHT = 170U,
   ST7789_X_OFFSET = 0U,
-  ST7789_Y_OFFSET = 0U,
+  ST7789_Y_OFFSET = 35U,
   ST7789_SPI_TIMEOUT_MS = 50U,
   ST7789_CMD_SWRESET = 0x01U,
   ST7789_CMD_SLPOUT = 0x11U,
@@ -23,13 +23,14 @@ enum
   ST7789_CMD_RASET = 0x2BU,
   ST7789_CMD_RAMWR = 0x2CU,
   ST7789_CMD_DISPON = 0x29U,
+  ST7789_MADCTL_LANDSCAPE = 0x60U,
   ST7789_COLOR_BLACK = 0x0000U,
   ST7789_COLOR_WHITE = 0xFFFFU,
   ST7789_COLOR_AMBER = 0xFD20U,
   ST7789_COLOR_CYAN = 0x07FFU,
-  ST7789_LINE_MARGIN_X = 12U,
-  ST7789_LINE_MARGIN_Y = 18U,
-  ST7789_LINE_PITCH = 48U,
+  ST7789_LINE_MARGIN_X = 10U,
+  ST7789_LINE_MARGIN_Y = 10U,
+  ST7789_LINE_PITCH = 38U,
   ST7789_CHAR_WIDTH = 4U,
   ST7789_CHAR_HEIGHT = 5U,
   ST7789_CHAR_SCALE = 2U,
@@ -228,11 +229,16 @@ static void St7789_GetGlyphRows(char character, uint8_t rows[ST7789_CHAR_HEIGHT]
   }
 }
 
-static bool St7789_DrawCharacter(uint16_t x, uint16_t y, char character, uint16_t fg_color, uint16_t bg_color)
+static bool St7789_DrawCharacter(uint16_t x, uint16_t y, char character, uint16_t fg_color, uint16_t bg_color, uint8_t scale)
 {
   uint8_t rows[ST7789_CHAR_HEIGHT];
   uint8_t row;
   uint8_t column;
+
+  if (scale == 0U)
+  {
+    return false;
+  }
 
   if (character >= 'a' && character <= 'z')
   {
@@ -243,8 +249,8 @@ static bool St7789_DrawCharacter(uint16_t x, uint16_t y, char character, uint16_
 
   if (!St7789_FillRect(x,
                        y,
-                       ST7789_CHAR_WIDTH * ST7789_CHAR_SCALE,
-                       ST7789_CHAR_HEIGHT * ST7789_CHAR_SCALE,
+                       ST7789_CHAR_WIDTH * scale,
+                       ST7789_CHAR_HEIGHT * scale,
                        bg_color))
   {
     return false;
@@ -256,10 +262,10 @@ static bool St7789_DrawCharacter(uint16_t x, uint16_t y, char character, uint16_
     {
       if ((rows[row] & (1U << (ST7789_CHAR_WIDTH - 1U - column))) != 0U)
       {
-        if (!St7789_FillRect((uint16_t)(x + column * ST7789_CHAR_SCALE),
-                             (uint16_t)(y + row * ST7789_CHAR_SCALE),
-                             ST7789_CHAR_SCALE,
-                             ST7789_CHAR_SCALE,
+        if (!St7789_FillRect((uint16_t)(x + column * scale),
+                             (uint16_t)(y + row * scale),
+                             scale,
+                             scale,
                              fg_color))
         {
           return false;
@@ -273,25 +279,32 @@ static bool St7789_DrawCharacter(uint16_t x, uint16_t y, char character, uint16_
 
 bool St7789_Init(void)
 {
+  HAL_StatusTypeDef pwm_status;
+  uint8_t pwm_start_failed;
   uint8_t data;
 
   memset(&st7789_context, 0, sizeof(st7789_context));
   st7789_context.width = ST7789_WIDTH;
   st7789_context.height = ST7789_HEIGHT;
+  pwm_start_failed = 0U;
 
   HAL_GPIO_WritePin(DISPLAY_RESET_GPIO_Port, DISPLAY_RESET_Pin, GPIO_PIN_RESET);
   HAL_Delay(10U);
   HAL_GPIO_WritePin(DISPLAY_RESET_GPIO_Port, DISPLAY_RESET_Pin, GPIO_PIN_SET);
   HAL_Delay(120U);
 
-  if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2) != HAL_OK)
+  pwm_status = HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
+  if ((pwm_status != HAL_OK) && (pwm_status != HAL_BUSY))
   {
-    st7789_context.last_error = ST7789_ERROR_INIT;
-    st7789_context.last_hal_status = (uint8_t)HAL_ERROR;
-    return false;
+    // Continue display init even if PWM start fails so SPI diagnostics remain possible.
+    pwm_start_failed = 1U;
+    st7789_context.last_hal_status = (uint8_t)pwm_status;
   }
 
-  St7789_SetBacklightPermille(800U);
+  if (pwm_start_failed == 0U)
+  {
+    St7789_SetBacklightPermille(800U);
+  }
 
   if (St7789_WriteCommand(ST7789_CMD_SWRESET) != HAL_OK)
   {
@@ -319,7 +332,7 @@ bool St7789_Init(void)
     return false;
   }
 
-  data = 0x00U;
+  data = ST7789_MADCTL_LANDSCAPE;
   if ((St7789_WriteCommand(ST7789_CMD_MADCTL) != HAL_OK) || (St7789_WriteData(&data, 1U) != HAL_OK))
   {
     st7789_context.last_error = ST7789_ERROR_SPI;
@@ -337,7 +350,10 @@ bool St7789_Init(void)
   HAL_Delay(20U);
   st7789_context.initialized = 1U;
   st7789_context.last_error = ST7789_ERROR_NONE;
-  st7789_context.last_hal_status = (uint8_t)HAL_OK;
+  if (pwm_start_failed == 0U)
+  {
+    st7789_context.last_hal_status = (uint8_t)HAL_OK;
+  }
   return St7789_FillScreen(ST7789_COLOR_BLACK);
 }
 
@@ -356,6 +372,64 @@ bool St7789_FillScreen(uint16_t rgb565)
     return false;
   }
 
+  return true;
+}
+
+bool St7789_ClearArea(uint16_t x, uint16_t y, uint16_t width, uint16_t height, uint16_t rgb565)
+{
+  if (st7789_context.initialized == 0U)
+  {
+    st7789_context.last_error = ST7789_ERROR_INIT;
+    return false;
+  }
+
+  if (!St7789_FillRect(x, y, width, height, rgb565))
+  {
+    st7789_context.last_error = ST7789_ERROR_SPI;
+    st7789_context.last_hal_status = (uint8_t)hspi2.ErrorCode;
+    return false;
+  }
+
+  st7789_context.last_error = ST7789_ERROR_NONE;
+  st7789_context.last_hal_status = (uint8_t)HAL_OK;
+  return true;
+}
+
+bool St7789_DrawText(uint16_t x, uint16_t y, const char *text, uint16_t fg_color, uint16_t bg_color, uint8_t scale)
+{
+  size_t text_index;
+  size_t text_length;
+
+  if ((text == NULL) || (scale == 0U))
+  {
+    st7789_context.last_error = ST7789_ERROR_ARGUMENT;
+    return false;
+  }
+
+  if (st7789_context.initialized == 0U)
+  {
+    return false;
+  }
+
+  text_length = strlen(text);
+  for (text_index = 0U; text_index < text_length; ++text_index)
+  {
+    if (!St7789_DrawCharacter(x, y, text[text_index], fg_color, bg_color, scale))
+    {
+      st7789_context.last_error = ST7789_ERROR_SPI;
+      st7789_context.last_hal_status = (uint8_t)hspi2.ErrorCode;
+      return false;
+    }
+
+    x = (uint16_t)(x + ST7789_CHAR_WIDTH * scale + ST7789_CHAR_SPACING);
+    if ((x + ST7789_CHAR_WIDTH * scale) >= ST7789_WIDTH)
+    {
+      break;
+    }
+  }
+
+  st7789_context.last_error = ST7789_ERROR_NONE;
+  st7789_context.last_hal_status = (uint8_t)HAL_OK;
   return true;
 }
 
@@ -380,7 +454,7 @@ bool St7789_DrawTextLine(uint8_t line_index, const char *text)
   }
 
   y = (uint16_t)(ST7789_LINE_MARGIN_Y + (uint16_t)line_index * ST7789_LINE_PITCH);
-  background_color = ((line_index & 1U) == 0U) ? ST7789_COLOR_BLACK : 0x0841U;
+  background_color = ST7789_COLOR_BLACK;
   foreground_color = (line_index == 0U) ? ST7789_COLOR_AMBER : ST7789_COLOR_CYAN;
 
   if (!St7789_FillRect(0U, y - 6U, ST7789_WIDTH, (uint16_t)(ST7789_LINE_PITCH - 4U), background_color))
@@ -399,7 +473,7 @@ bool St7789_DrawTextLine(uint8_t line_index, const char *text)
 
   for (text_index = 0U; text_index < text_length; ++text_index)
   {
-    if (!St7789_DrawCharacter(x, y, text[text_index], foreground_color, background_color))
+    if (!St7789_DrawCharacter(x, y, text[text_index], foreground_color, background_color, ST7789_CHAR_SCALE))
     {
       st7789_context.last_error = ST7789_ERROR_SPI;
       st7789_context.last_hal_status = (uint8_t)hspi2.ErrorCode;

@@ -12,8 +12,8 @@
 
 enum
 {
-  UI_ENCODER_COUNTS_PER_DETENT = 4,
-  UI_TARGET_STEP_CDEG = 50U,
+  UI_ENCODER_COUNTS_PER_DETENT = 2,
+  UI_TARGET_STEP_CDEG = 10U,
   UI_TARGET_MIN_CDEG = 200U,
   UI_TARGET_MAX_CDEG = 4500U,
   UI_BUTTON_LONG_PRESS_MS = 1200U,
@@ -34,7 +34,7 @@ static void Ui_PublishEvent(UiEvent event_id, uint16_t event_value)
   ui_context.event_counter++;
 }
 
-static void Ui_SetTargetTemp(uint16_t target_temp_cdeg, uint32_t now_ms)
+static void Ui_SetTargetTemp(int32_t target_temp_cdeg, uint32_t now_ms)
 {
   if (target_temp_cdeg < UI_TARGET_MIN_CDEG)
   {
@@ -46,16 +46,16 @@ static void Ui_SetTargetTemp(uint16_t target_temp_cdeg, uint32_t now_ms)
     target_temp_cdeg = UI_TARGET_MAX_CDEG;
   }
 
-  if (ui_context.target_temp_cdeg == target_temp_cdeg)
+  if (ui_context.target_temp_cdeg == (uint16_t)target_temp_cdeg)
   {
     return;
   }
 
-  ui_context.target_temp_cdeg = target_temp_cdeg;
+  ui_context.target_temp_cdeg = (uint16_t)target_temp_cdeg;
   ui_context.last_target_change_ms = now_ms;
   ui_context.save_pending = 1U;
-  Heater_Control_SetTargetTempCdeg(target_temp_cdeg);
-  Ui_PublishEvent(UI_EVENT_TARGET_CHANGED, target_temp_cdeg);
+  Heater_Control_SetTargetTempCdeg((uint16_t)target_temp_cdeg);
+  Ui_PublishEvent(UI_EVENT_TARGET_CHANGED, (uint16_t)target_temp_cdeg);
 }
 
 static void Ui_HandleEncoderDetents(int16_t detents, uint32_t now_ms)
@@ -68,7 +68,7 @@ static void Ui_HandleEncoderDetents(int16_t detents, uint32_t now_ms)
   if (ui_context.screen == UI_SCREEN_MAIN)
   {
     int32_t next_target = (int32_t)ui_context.target_temp_cdeg + ((int32_t)detents * (int32_t)UI_TARGET_STEP_CDEG);
-    Ui_SetTargetTemp((uint16_t)next_target, now_ms);
+    Ui_SetTargetTemp(next_target, now_ms);
     return;
   }
 
@@ -101,7 +101,6 @@ static void Ui_ExitMenu(void)
 static void Ui_ExecuteMenuAction(void)
 {
   const HeaterControlContext *heater = Heater_Control_GetContext();
-  uint8_t ack_result;
 
   switch ((UiMenuItem)ui_context.selected_menu_item)
   {
@@ -113,7 +112,6 @@ static void Ui_ExecuteMenuAction(void)
           Ui_PublishEvent(UI_EVENT_CALIBRATION_POINT_CAPTURED, Calibration_GetSessionContext()->stored_point_count);
           return;
         }
-
         Ui_PublishEvent(UI_EVENT_CALIBRATION_REJECTED, heater->external_sensor_ready);
         break;
       }
@@ -127,27 +125,7 @@ static void Ui_ExecuteMenuAction(void)
           return;
         }
       }
-
       Ui_PublishEvent(UI_EVENT_CALIBRATION_REJECTED, heater->external_sensor_ready);
-      break;
-
-    case UI_MENU_STREAM_TOGGLE:
-      ui_context.stream_enabled = (uint8_t)!ui_context.stream_enabled;
-      Ui_PublishEvent(UI_EVENT_STREAM_TOGGLED, ui_context.stream_enabled);
-      break;
-
-    case UI_MENU_DOCK_TOGGLE:
-      Station_App_SetDocked((uint8_t)(Station_App_GetContext()->docked == 0U));
-      Ui_PublishEvent(UI_EVENT_DOCK_TOGGLED, Station_App_GetContext()->docked);
-      break;
-
-    case UI_MENU_SCREEN_CYCLE:
-      Ui_PublishEvent(UI_EVENT_SCREEN_CHANGED, (uint16_t)Display_CyclePage());
-      break;
-
-    case UI_MENU_FAULT_ACK:
-      ack_result = Station_App_AcknowledgeFaults(STATION_FAULT_INJECTED);
-      Ui_PublishEvent(UI_EVENT_FAULT_ACK_RESULT, ack_result);
       break;
 
     case UI_MENU_EXIT:
@@ -212,6 +190,7 @@ void Ui_Init(uint8_t status_stream_enabled)
   }
 
   ui_last_encoder_counter = (uint16_t)__HAL_TIM_GET_COUNTER(&htim5);
+
   ui_last_button_level = HAL_GPIO_ReadPin(ENCODER_SW_GPIO_Port, ENCODER_SW_Pin);
 }
 
@@ -286,24 +265,12 @@ const char *Ui_GetMenuItemName(UiMenuItem item)
   switch (item)
   {
     case UI_MENU_START_CALIBRATION:
-      return "START_CAL";
-
-    case UI_MENU_STREAM_TOGGLE:
-      return "STREAM";
-
-    case UI_MENU_DOCK_TOGGLE:
-      return "DOCK";
-
-    case UI_MENU_SCREEN_CYCLE:
-      return "SCREEN";
-
-    case UI_MENU_FAULT_ACK:
-      return "FAULT_ACK";
+      return "CALIB";
 
     case UI_MENU_EXIT:
-      return "EXIT";
+      return "BACK";
 
     default:
-      return "UNKNOWN";
+      return "UNK";
   }
 }

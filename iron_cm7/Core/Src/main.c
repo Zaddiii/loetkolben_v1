@@ -120,12 +120,15 @@ static uint32_t debug_last_logged_measurement_ready = 0xFFFFFFFFU;
 static uint32_t debug_last_ui_event_counter = 0U;
 static uint32_t debug_button_press_start_ms = 0U;
 static uint32_t debug_status_stream_period_ms = 1000U;
+static uint32_t debug_encoder_live_period_ms = 100U;
+static uint32_t debug_last_encoder_live_report_ms = 0U;
 static char debug_console_rx_buffer[128];
 static uint8_t debug_console_rx_length = 0U;
 static uint8_t debug_console_discard_until_newline = 0U;
 static GPIO_PinState debug_last_button_level = GPIO_PIN_RESET;
 static uint8_t debug_button_long_press_handled = 0U;
 static uint8_t debug_status_stream_enabled = 0U;
+static uint8_t debug_encoder_live_enabled = 0U;
 
 /* USER CODE END PV */
 
@@ -151,6 +154,8 @@ static void Debug_ReportPeriodicStatus(uint32_t now_ms, uint8_t force);
 static void Debug_ReportSimulationStatus(void);
 static void Debug_ReportInaStatus(void);
 static void Debug_ReportScreen(void);
+static void Debug_ReportEncoderStatus(void);
+static void Debug_ReportEncoderLive(uint32_t now_ms, uint8_t force);
 static const char *Debug_GetStationStateName(StationState state);
 static const char *Debug_GetStationOperatingModeName(StationOperatingMode mode);
 static void Debug_FormatFaultFlags(uint32_t fault_flags, char *buffer, size_t buffer_size);
@@ -247,7 +252,7 @@ int main(void)
             (unsigned int)IRON_VIRTUAL_MCP9808,
             (unsigned int)IRON_VIRTUAL_MAX31856);
   Debug_Log("LED1 heartbeat active, USART3 debug active, USER button short=calibration long=fault-ack-or-inject\r\n");
-  Debug_Log("UART commands: help, ping, version, health, status, stream, stream on, stream off, stream <ms>, profile, target, target <degC>, storage, fault, fault ack, fault inject, ui, cal, sim, dock, fan, ina, screen\r\n");
+  Debug_Log("UART commands: help, ping, version, health, status, stream, stream on, stream off, stream <ms>, profile, target, target <degC>, storage, fault, fault ack, fault inject, ui, enc, enc live, enc live on, enc live off, enc live <ms>, cal, sim, dock, fan, ina, screen\r\n");
   Debug_Log("status stream default=off\r\n");
   Debug_Log("storage flash_valid=%u err=%u target=%u.%uC cal_valid=%u pts=%u\r\n",
             (unsigned int)Storage_GetContext()->flash_data_valid,
@@ -358,6 +363,7 @@ int main(void)
     Debug_ReportUiEvents();
     Debug_ReportChanges();
     Debug_ReportPeriodicStatus(now_ms, 0U);
+    Debug_ReportEncoderLive(now_ms, 0U);
 
     HAL_Delay(10);
     /* USER CODE END WHILE */
@@ -437,8 +443,8 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOF, TIP_CLAMP_Pin, TIP_CLAMP_SAFE_LEVEL);
   HAL_GPIO_WritePin(GPIOB, DISPLAY_DC_Pin, DISPLAY_DC_SAFE_LEVEL);
   HAL_GPIO_WritePin(GPIOB, LED1_Pin, LED1_OFF_LEVEL);
-  HAL_GPIO_WritePin(GPIOD, DISPLAY_RESET_Pin, DISPLAY_RESET_SAFE_LEVEL);
-  HAL_GPIO_WritePin(GPIOD, DISPLAY_CS_Pin, DISPLAY_CS_SAFE_LEVEL);
+  HAL_GPIO_WritePin(DISPLAY_RESET_GPIO_Port, DISPLAY_RESET_Pin, DISPLAY_RESET_SAFE_LEVEL);
+  HAL_GPIO_WritePin(DISPLAY_CS_GPIO_Port, DISPLAY_CS_Pin, DISPLAY_CS_SAFE_LEVEL);
   HAL_GPIO_WritePin(GPIOG, MAX31856_CS_Pin, MAX31856_CS_SAFE_LEVEL);
 
   GPIO_InitStruct.Pin = HEATER_EN_Pin;
@@ -456,8 +462,11 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pin = LED1_Pin;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = DISPLAY_RESET_Pin | DISPLAY_CS_Pin;
-  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+  GPIO_InitStruct.Pin = DISPLAY_RESET_Pin;
+  HAL_GPIO_Init(DISPLAY_RESET_GPIO_Port, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = DISPLAY_CS_Pin;
+  HAL_GPIO_Init(DISPLAY_CS_GPIO_Port, &GPIO_InitStruct);
 
   GPIO_InitStruct.Pin = MAX31856_CS_Pin;
   HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
@@ -767,6 +776,7 @@ static void Debug_NormalizeConsoleCommand(char *command)
   size_t write_index = 0U;
   size_t start_index = 0U;
   size_t end_index;
+  uint8_t previous_was_space = 1U;
 
   if (command == NULL)
   {
@@ -777,12 +787,23 @@ static void Debug_NormalizeConsoleCommand(char *command)
   {
     unsigned char current = (unsigned char)command[read_index];
 
-    if ((current < 0x20U) && (current != ' '))
+    if (isspace(current) != 0)
+    {
+      if (previous_was_space == 0U)
+      {
+        command[write_index++] = ' ';
+        previous_was_space = 1U;
+      }
+      continue;
+    }
+
+    if (current < 0x20U)
     {
       continue;
     }
 
-    command[write_index++] = (char)current;
+    command[write_index++] = (char)tolower(current);
+    previous_was_space = 0U;
   }
 
   command[write_index] = '\0';
@@ -825,7 +846,7 @@ static void Debug_ProcessConsoleCommand(const char *command)
 
   if (strcmp(command, "help") == 0)
   {
-    Debug_Log("commands: help | ping | version | health | status | stream | stream on | stream off | stream <ms> | profile | target | target <degC> | storage | fault | fault ack | fault inject | ui | cal | cal start | cal point | cal finish | cal cancel | sim | sim ambient <degC> | sim load <percent> | sim tip <degC> | sim reset | dock | dock on | dock off | dock toggle | fan | ina | screen | screen next | screen <page>\r\n");
+    Debug_Log("commands: help | ping | version | health | status | stream | stream on | stream off | stream <ms> | profile | target | target <degC> | storage | fault | fault ack | fault inject | ui | enc | enc live | enc live on | enc live off | enc live <ms> | cal | cal start | cal point | cal finish | cal cancel | sim | sim ambient <degC> | sim load <percent> | sim tip <degC> | sim reset | dock | dock on | dock off | dock toggle | fan | ina | screen | screen next | screen <page>\r\n");
     Debug_PrintConsolePrompt();
     return;
   }
@@ -1202,30 +1223,6 @@ static void Debug_ProcessConsoleCommand(const char *command)
     return;
   }
 
-  if (strcmp(command, "screen overview") == 0)
-  {
-    Display_SetPage(DISPLAY_PAGE_OVERVIEW);
-    Debug_ReportScreen();
-    Debug_PrintConsolePrompt();
-    return;
-  }
-
-  if (strcmp(command, "screen thermal") == 0)
-  {
-    Display_SetPage(DISPLAY_PAGE_THERMAL);
-    Debug_ReportScreen();
-    Debug_PrintConsolePrompt();
-    return;
-  }
-
-  if (strcmp(command, "screen control") == 0)
-  {
-    Display_SetPage(DISPLAY_PAGE_CONTROL);
-    Debug_ReportScreen();
-    Debug_PrintConsolePrompt();
-    return;
-  }
-
   if (strcmp(command, "screen cal") == 0)
   {
     Display_SetPage(DISPLAY_PAGE_CALIBRATION);
@@ -1285,6 +1282,59 @@ static void Debug_ProcessConsoleCommand(const char *command)
     return;
   }
 
+  if ((strcmp(command, "encoder") == 0) || (strcmp(command, "enc") == 0))
+  {
+    Debug_ReportEncoderStatus();
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if (strcmp(command, "enc live") == 0)
+  {
+    Debug_Log("enc live=%s period=%lums\r\n",
+              debug_encoder_live_enabled ? "on" : "off",
+              (unsigned long)debug_encoder_live_period_ms);
+    Debug_ReportEncoderLive(HAL_GetTick(), 1U);
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if ((strcmp(command, "enc live on") == 0) || (strcmp(command, "enc liveon") == 0) || (strcmp(command, "encliveon") == 0))
+  {
+    debug_encoder_live_enabled = 1U;
+    debug_last_encoder_live_report_ms = 0U;
+    Debug_Log("enc live enabled period=%lums\r\n", (unsigned long)debug_encoder_live_period_ms);
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  if ((strcmp(command, "enc live off") == 0) || (strcmp(command, "enc liveoff") == 0) || (strcmp(command, "encliveoff") == 0))
+  {
+    debug_encoder_live_enabled = 0U;
+    Debug_Log("enc live disabled\r\n");
+    Debug_PrintConsolePrompt();
+    return;
+  }
+
+  {
+    unsigned int encoder_live_period_ms;
+
+    if (sscanf(command, "enc live %u", &encoder_live_period_ms) == 1)
+    {
+      if (encoder_live_period_ms < 20U)
+      {
+        encoder_live_period_ms = 20U;
+      }
+
+      debug_encoder_live_period_ms = encoder_live_period_ms;
+      debug_encoder_live_enabled = 1U;
+      debug_last_encoder_live_report_ms = 0U;
+      Debug_Log("enc live enabled period=%ums\r\n", encoder_live_period_ms);
+      Debug_PrintConsolePrompt();
+      return;
+    }
+  }
+
   Debug_Log("unknown command: %s\r\n", command);
   Debug_PrintConsolePrompt();
 }
@@ -1339,16 +1389,77 @@ static void Debug_ReportScreen(void)
   const DisplayContext *display = Display_GetContext();
   const St7789Context *st7789 = St7789_GetContext();
 
-  Debug_Log("screen[%lu] hw=%u err=%u bl=%u page=%s: %s | %s | %s | %s\r\n",
+  Debug_Log("screen[%lu] hw=%u err=%u hal=%u bl=%u page=%s: %s | %s | %s | %s\r\n",
             (unsigned long)display->version,
             (unsigned int)st7789->initialized,
             (unsigned int)st7789->last_error,
+            (unsigned int)st7789->last_hal_status,
             (unsigned int)st7789->backlight_permille,
             Display_GetPageName((DisplayPage)display->page),
             display->lines[0],
             display->lines[1],
             display->lines[2],
             display->lines[3]);
+}
+
+static void Debug_ReportEncoderStatus(void)
+{
+  GPIO_PinState enc_a_state = HAL_GPIO_ReadPin(ENCODER_A_GPIO_Port, ENCODER_A_Pin);
+  GPIO_PinState enc_b_state = HAL_GPIO_ReadPin(ENCODER_B_GPIO_Port, ENCODER_B_Pin);
+  TIM_TypeDef *encoder_tim = htim5.Instance;
+  uint32_t tim_cnt = encoder_tim->CNT;
+  uint32_t tim_cr1 = encoder_tim->CR1;
+  uint32_t tim_cen = (tim_cr1 & TIM_CR1_CEN) ? 1U : 0U;
+  uint32_t tim_icr1 = encoder_tim->CCR1;
+  uint32_t tim_icr2 = encoder_tim->CCR2;
+  uint32_t enc_a_raw = ((ENCODER_A_GPIO_Port->IDR & ENCODER_A_Pin) != 0U) ? 1U : 0U;
+  uint32_t enc_b_raw = ((ENCODER_B_GPIO_Port->IDR & ENCODER_B_Pin) != 0U) ? 1U : 0U;
+
+  Debug_Log("encoder: a=%u b=%u tim=%08lX cnt=%u run=%u ic1=%u ic2=%u a_raw=%u b_raw=%u\r\n",
+            (unsigned int)enc_a_state,
+            (unsigned int)enc_b_state,
+            (unsigned long)encoder_tim,
+            (unsigned int)tim_cnt,
+            (unsigned int)tim_cen,
+            (unsigned int)tim_icr1,
+            (unsigned int)tim_icr2,
+            (unsigned int)enc_a_raw,
+            (unsigned int)enc_b_raw);
+}
+
+static void Debug_ReportEncoderLive(uint32_t now_ms, uint8_t force)
+{
+  const UiContext *ui = Ui_GetContext();
+  TIM_TypeDef *encoder_tim = htim5.Instance;
+  uint32_t enc_a_raw = ((ENCODER_A_GPIO_Port->IDR & ENCODER_A_Pin) != 0U) ? 1U : 0U;
+  uint32_t enc_b_raw = ((ENCODER_B_GPIO_Port->IDR & ENCODER_B_Pin) != 0U) ? 1U : 0U;
+  uint32_t sw_raw = (HAL_GPIO_ReadPin(ENCODER_SW_GPIO_Port, ENCODER_SW_Pin) == ENCODER_SW_ACTIVE_LEVEL) ? 1U : 0U;
+  uint32_t cnt = (encoder_tim != NULL) ? encoder_tim->CNT : 0U;
+  uint32_t cen = (encoder_tim != NULL) ? ((encoder_tim->CR1 & TIM_CR1_CEN) ? 1U : 0U) : 0U;
+
+  if ((force == 0U) && (debug_encoder_live_enabled == 0U))
+  {
+    return;
+  }
+
+  if ((force == 0U) && ((now_ms - debug_last_encoder_live_report_ms) < debug_encoder_live_period_ms))
+  {
+    return;
+  }
+
+  debug_last_encoder_live_report_ms = now_ms;
+
+  Debug_Log("enc_live t=%lu a=%u b=%u sw=%u tim_cnt=%lu run=%lu ui_evt=%lu set=%u.%uC screen=%u\r\n",
+            (unsigned long)now_ms,
+            (unsigned int)enc_a_raw,
+            (unsigned int)enc_b_raw,
+            (unsigned int)sw_raw,
+            (unsigned long)cnt,
+            (unsigned long)cen,
+            (unsigned long)ui->event_counter,
+            (unsigned int)(ui->target_temp_cdeg / 10U),
+            (unsigned int)(ui->target_temp_cdeg % 10U),
+            (unsigned int)ui->screen);
 }
 
 static void Debug_ReportUiEvents(void)

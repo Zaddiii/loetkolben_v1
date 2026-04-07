@@ -6,6 +6,15 @@ Das vorhandene Repository ist im Moment ein Dual-Core-STM32CubeMX-Projekt mit ei
 
 Das Konzept in `docs/anforderung loetkolben.txt` ist fuer eine deutlich andere Zielhardware geschrieben als das aktuelle Nucleo-Testsetup in `nucleotest.ioc`.
 
+## WICHTIGER NUCLEO-PIN-HINWEIS NICHT VERGESSEN
+
+- Auf dem NUCLEO-H755ZI-Q sind PD8/PD9 fuer ST-LINK VCP und USART3-Debug reserviert.
+- Display RESET/CS duerfen nicht auf PD8/PD9 liegen, solange USART3-Debug aktiv bleiben soll.
+- Im aktuellen `iron_cm7`-Stand ist deshalb umgelegt auf:
+  - `DISPLAY_RESET` = PE0
+  - `DISPLAY_CS` = PE1
+- Wenn spaeter Pins in CubeMX erneut geaendert werden: RESET/CS nicht zurueck auf PD8/PD9 legen, sonst faellt serielle Debug-Ausgabe aus.
+
 Wichtig fuer die weitere Umsetzung:
 
 - V1 soll bewusst einfach bleiben
@@ -349,7 +358,7 @@ Fuer V1 reicht eine feste 24-V-Vorgabe voellig aus.
 
 #### Benutzerinterface
 
-- PB13/PB15/PB14/PD8/PD9: Display auf SPI2 plus DC, Reset, CS
+- PB13/PB15/PB14/PE0/PE1: Display auf SPI2 plus DC, Reset, CS
 - PA7: Display-Backlight PWM
 - PA0/PA1: Encoder ueber TIM5 Encoder Mode
 - PA2: Encoder-Taster
