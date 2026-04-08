@@ -6,13 +6,16 @@
 #include "mcp9808.h"
 #include "max31856.h"
 #include "peripherals.h"
+#include "safety_guard.h"
 
 enum
 {
   HEATER_MEASUREMENT_PERIOD_MS = 20U,
+  HEATER_ADC_POLL_TIMEOUT_MS = 5U,
+  HEATER_MEAS_FAIL_RECOVERY_THRESHOLD = 10U,
   HEATER_SWITCH_OFF_DELAY_US = 15U,
   HEATER_CLAMP_SETTLE_US = 20U,
-  HEATER_RESTORE_DELAY_US = 8U,
+  HEATER_RESTORE_DELAY_US = 10U,
   HEATER_ADC_SAMPLE_COUNT = 8U,
   HEATER_PWM_MAX_PERMILLE = 1000U,
   HEATER_DEFAULT_TARGET_TEMP_CDEG = 3200U,
@@ -42,19 +45,28 @@ enum
   HEATER_AUX_ADC_FULL_SCALE_RAW = 4095U,
   HEATER_AUX_CURRENT_FULL_SCALE_MA = 8000U,
   HEATER_AUX_VBUS_FULL_SCALE_MV = 30000U,
+  HEATER_INTERNAL_ADC_FULL_SCALE_RAW = 65535U,
+  HEATER_TEST_LINEAR_TIP_MAX_CDEG = 5000U,
   HEATER_BUCKBOOST_TARGET_MV = 24000U,
-  HEATER_BUCKBOOST_REF_FULL_SCALE_MV = 26000U
+  HEATER_BUCKBOOST_REF_FULL_SCALE_MV = 26000U,
+  HEATER_MEAS_ERR_ADC1_START = (1U << 0),
+  HEATER_MEAS_ERR_ADC1_TIMEOUT = (1U << 1),
+  HEATER_MEAS_ERR_ADC1_STOP = (1U << 2),
+  HEATER_MEAS_ERR_ADC2_READ = (1U << 3)
 };
 
 static HeaterControlContext heater_context;
+static uint8_t heater_dwt_delay_ready;
+static int32_t heater_control_integrator_permille;
+static uint16_t heater_test_ambient_temp_cdeg;
+static uint32_t heater_measurement_fail_streak;
 
 static void Heater_ApplyPwm(uint16_t pwm_permille);
+static uint16_t Heater_ComputeControlPwmPermille(void);
 static void Heater_UpdateBuckBoostReference(uint16_t pwm_permille);
 static void Heater_UpdateScaledAuxiliaryTelemetry(void);
-#if !(IRON_VIRTUAL_INTERNAL_ADC || IRON_VIRTUAL_AUX_ADC)
-static uint16_t Heater_ReadSingleAdcSample(ADC_HandleTypeDef *hadc);
-#endif
-static void Heater_ReadAuxiliaryMeasurements(void);
+static uint8_t Heater_ReadAuxiliaryMeasurements(void);
+static void Heater_HandleMeasurementFailure(uint16_t error_flag);
 static void Heater_UpdateDerivedTelemetry(uint32_t now_ms);
 static uint16_t Heater_ClampTargetTempCdeg(uint16_t target_temp_cdeg);
 
@@ -223,7 +235,7 @@ static void Heater_UpdateDerivedTelemetry(uint32_t now_ms)
 {
   const Mcp9808Context *ambient_sensor = Mcp9808_GetContext();
   const Max31856Context *max31856 = Max31856_GetContext();
-#if !(IRON_VIRTUAL_INTERNAL_ADC || IRON_VIRTUAL_AUX_ADC)
+#if !(IRON_VIRTUAL_INTERNAL_ADC || IRON_VIRTUAL_AUX_ADC) && !IRON_VIRTUAL_CALIBRATION
   uint16_t tip_temp_cdeg;
 #endif
   int16_t ambient_temp_cdeg = HEATER_DEFAULT_AMBIENT_TEMP_CDEG;
@@ -237,6 +249,11 @@ static void Heater_UpdateDerivedTelemetry(uint32_t now_ms)
   {
     heater_context.ambient_sensor_ready = 0U;
   }
+
+#if IRON_VIRTUAL_MCP9808
+  ambient_temp_cdeg = (int16_t)heater_test_ambient_temp_cdeg;
+  heater_context.ambient_sensor_ready = 1U;
+#endif
 
   if (Max31856_Poll(now_ms))
   {
@@ -262,6 +279,10 @@ static void Heater_UpdateDerivedTelemetry(uint32_t now_ms)
 #else
   heater_context.ambient_temp_cdeg = ambient_temp_cdeg;
 
+#if IRON_VIRTUAL_CALIBRATION
+  heater_context.tip_temp_cdeg = (uint16_t)(((uint32_t)heater_context.filtered_raw * HEATER_TEST_LINEAR_TIP_MAX_CDEG) /
+                                            HEATER_INTERNAL_ADC_FULL_SCALE_RAW);
+#else
   if (Calibration_ConvertRawToTipCdeg(heater_context.filtered_raw, ambient_temp_cdeg, &tip_temp_cdeg))
   {
     heater_context.tip_temp_cdeg = tip_temp_cdeg;
@@ -270,6 +291,7 @@ static void Heater_UpdateDerivedTelemetry(uint32_t now_ms)
   {
     heater_context.tip_temp_cdeg = 0U;
   }
+#endif
 #endif
 
   heater_context.power_watt_x10 = (uint16_t)(((uint32_t)heater_context.heater_current_ma * (uint32_t)heater_context.buckboost_voltage_mv) / 100000U);
@@ -285,44 +307,30 @@ static void Heater_UpdateDerivedTelemetry(uint32_t now_ms)
 
 static void Heater_TimerWaitUs(uint16_t wait_us)
 {
-  __HAL_TIM_SET_COUNTER(&htim7, 0U);
+  uint32_t start_cycles;
+  uint32_t target_cycles;
 
-  while (__HAL_TIM_GET_COUNTER(&htim7) < wait_us)
+  if (wait_us == 0U)
   {
+    return;
   }
-}
 
-static uint16_t Heater_FilterSamples(const uint16_t *samples, uint8_t count)
-{
-  uint32_t sum = 0;
-  uint16_t min_value = 0xFFFFU;
-  uint16_t max_value = 0U;
-  uint8_t index;
-
-  for (index = 0; index < count; ++index)
+  if (heater_dwt_delay_ready == 0U)
   {
-    uint16_t value = samples[index];
-    sum += value;
-
-    if (value < min_value)
+    __HAL_TIM_SET_COUNTER(&htim7, 0U);
+    while (__HAL_TIM_GET_COUNTER(&htim7) < wait_us)
     {
-      min_value = value;
     }
 
-    if (value > max_value)
-    {
-      max_value = value;
-    }
+    return;
   }
 
-  if (count > 2U)
+  start_cycles = DWT->CYCCNT;
+  target_cycles = (SystemCoreClock / 1000000U) * (uint32_t)wait_us;
+
+  while ((DWT->CYCCNT - start_cycles) < target_cycles)
   {
-    sum -= min_value;
-    sum -= max_value;
-    return (uint16_t)(sum / (uint32_t)(count - 2U));
   }
-
-  return (uint16_t)(sum / count);
 }
 
 static uint16_t Heater_ClampTargetTempCdeg(uint16_t target_temp_cdeg)
@@ -338,6 +346,65 @@ static uint16_t Heater_ClampTargetTempCdeg(uint16_t target_temp_cdeg)
   }
 
   return target_temp_cdeg;
+}
+
+static uint16_t Heater_ComputeControlPwmPermille(void)
+{
+  int32_t tip_temp_cdeg = (int32_t)heater_context.tip_temp_cdeg;
+  int32_t target_temp_cdeg = (int32_t)heater_context.effective_target_temp_cdeg;
+  int32_t ambient_temp_cdeg = (int32_t)heater_context.ambient_temp_cdeg;
+  int32_t error_cdeg = target_temp_cdeg - tip_temp_cdeg;
+  int32_t requested_pwm_permille;
+
+  if (target_temp_cdeg <= (ambient_temp_cdeg + 50))
+  {
+    heater_control_integrator_permille = 0;
+    return 0U;
+  }
+
+  if (error_cdeg >= 0)
+  {
+    heater_control_integrator_permille += error_cdeg / 35;
+  }
+  else
+  {
+    heater_control_integrator_permille += error_cdeg / 60;
+  }
+
+  if (heater_control_integrator_permille > HEATER_SIMULATED_INTEGRATOR_MAX)
+  {
+    heater_control_integrator_permille = HEATER_SIMULATED_INTEGRATOR_MAX;
+  }
+
+  if (heater_control_integrator_permille < HEATER_SIMULATED_INTEGRATOR_MIN)
+  {
+    heater_control_integrator_permille = HEATER_SIMULATED_INTEGRATOR_MIN;
+  }
+
+  requested_pwm_permille = (error_cdeg * 2) / 3;
+  requested_pwm_permille += heater_control_integrator_permille;
+
+  if (error_cdeg > 0)
+  {
+    requested_pwm_permille += HEATER_SIMULATED_MIN_HOLD_PWM_PERMILLE;
+  }
+
+  if (error_cdeg < -(int32_t)HEATER_SIMULATED_READY_BAND_CDEG)
+  {
+    requested_pwm_permille = 0;
+  }
+
+  if (requested_pwm_permille < 0)
+  {
+    requested_pwm_permille = 0;
+  }
+
+  if (requested_pwm_permille > HEATER_PWM_MAX_PERMILLE)
+  {
+    requested_pwm_permille = HEATER_PWM_MAX_PERMILLE;
+  }
+
+  return (uint16_t)requested_pwm_permille;
 }
 
 static void Heater_ApplyPwm(uint16_t pwm_permille)
@@ -372,66 +439,44 @@ static void Heater_UpdateBuckBoostReference(uint16_t pwm_permille)
   }
 }
 
-#if !(IRON_VIRTUAL_INTERNAL_ADC || IRON_VIRTUAL_AUX_ADC)
-static uint16_t Heater_ReadSingleAdcSample(ADC_HandleTypeDef *hadc)
-{
-  uint32_t value;
-
-  if (HAL_ADC_Start(hadc) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  if (HAL_ADC_PollForConversion(hadc, 2U) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  value = HAL_ADC_GetValue(hadc);
-
-  if (HAL_ADC_Stop(hadc) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  return (uint16_t)value;
-}
-#endif
-
 static void Heater_UpdateScaledAuxiliaryTelemetry(void)
 {
   heater_context.heater_current_ma = (uint16_t)(((uint32_t)heater_context.heater_current_raw * HEATER_AUX_CURRENT_FULL_SCALE_MA) / HEATER_AUX_ADC_FULL_SCALE_RAW);
   heater_context.buckboost_voltage_mv = (uint16_t)(((uint32_t)heater_context.buckboost_voltage_raw * HEATER_AUX_VBUS_FULL_SCALE_MV) / HEATER_AUX_ADC_FULL_SCALE_RAW);
 }
 
-static void Heater_ReadAuxiliaryMeasurements(void)
+static uint8_t Heater_ReadAuxiliaryMeasurements(void)
 {
 #if IRON_VIRTUAL_AUX_ADC
   heater_context.heater_current_raw = (uint16_t)(700U + ((uint32_t)heater_context.pwm_permille * 11U) / 10U);
   heater_context.buckboost_voltage_raw = (uint16_t)(2400U + ((uint32_t)heater_context.pwm_permille * 9U) / 10U);
+  return 1U;
 #else
   if (HAL_ADC_Start(&hadc2) != HAL_OK)
   {
-    Error_Handler();
+    return 0U;
   }
 
-  if (HAL_ADC_PollForConversion(&hadc2, 2U) != HAL_OK)
+  if (HAL_ADC_PollForConversion(&hadc2, HEATER_ADC_POLL_TIMEOUT_MS) != HAL_OK)
   {
-    Error_Handler();
+    (void)HAL_ADC_Stop(&hadc2);
+    return 0U;
   }
   heater_context.heater_current_raw = (uint16_t)HAL_ADC_GetValue(&hadc2);
 
-  if (HAL_ADC_PollForConversion(&hadc2, 2U) != HAL_OK)
+  if (HAL_ADC_PollForConversion(&hadc2, HEATER_ADC_POLL_TIMEOUT_MS) != HAL_OK)
   {
-    Error_Handler();
+    (void)HAL_ADC_Stop(&hadc2);
+    return 0U;
   }
   heater_context.buckboost_voltage_raw = (uint16_t)HAL_ADC_GetValue(&hadc2);
 
   if (HAL_ADC_Stop(&hadc2) != HAL_OK)
   {
-    Error_Handler();
+    return 0U;
   }
 
+  return 1U;
 #endif
 }
 
@@ -453,7 +498,7 @@ static void Heater_FillSimulatedSamples(void)
 }
 #endif
 
-static void Heater_PerformMeasurementSequence(void)
+static uint8_t Heater_PerformMeasurementSequence(void)
 {
 #if !IRON_VIRTUAL_INTERNAL_ADC
   uint8_t index;
@@ -470,21 +515,53 @@ static void Heater_PerformMeasurementSequence(void)
 #else
   for (index = 0; index < HEATER_ADC_SAMPLE_COUNT; ++index)
   {
-    heater_context.latest_samples[index] = Heater_ReadSingleAdcSample(&hadc1);
+    if (HAL_ADC_Start(&hadc1) != HAL_OK)
+    {
+      Heater_HandleMeasurementFailure(HEATER_MEAS_ERR_ADC1_START);
+      return 0U;
+    }
+
+    if (HAL_ADC_PollForConversion(&hadc1, HEATER_ADC_POLL_TIMEOUT_MS) != HAL_OK)
+    {
+      (void)HAL_ADC_Stop(&hadc1);
+      Heater_HandleMeasurementFailure(HEATER_MEAS_ERR_ADC1_TIMEOUT);
+      return 0U;
+    }
+
+    heater_context.latest_samples[index] = (uint16_t)HAL_ADC_GetValue(&hadc1);
+
+    if (HAL_ADC_Stop(&hadc1) != HAL_OK)
+    {
+      Heater_HandleMeasurementFailure(HEATER_MEAS_ERR_ADC1_STOP);
+      return 0U;
+    }
   }
 #endif
 
   HAL_GPIO_WritePin(TIP_CLAMP_GPIO_Port, TIP_CLAMP_Pin, TIP_CLAMP_SAFE_LEVEL);
   Heater_TimerWaitUs(HEATER_RESTORE_DELAY_US);
 
-  heater_context.filtered_raw = Heater_FilterSamples(heater_context.latest_samples, HEATER_ADC_SAMPLE_COUNT);
-  Heater_ReadAuxiliaryMeasurements();
+  HAL_GPIO_WritePin(HEATER_EN_GPIO_Port, HEATER_EN_Pin, HEATER_EN_ACTIVE_LEVEL);
+
+  heater_context.filtered_raw = heater_context.latest_samples[HEATER_ADC_SAMPLE_COUNT - 1U];
+  if (Heater_ReadAuxiliaryMeasurements() == 0U)
+  {
+    Heater_HandleMeasurementFailure(HEATER_MEAS_ERR_ADC2_READ);
+    return 0U;
+  }
   Heater_UpdateDerivedTelemetry(HAL_GetTick());
   heater_context.sample_count = HEATER_ADC_SAMPLE_COUNT;
-  heater_context.measurement_ready = 1U;
 
-  /* Heating stays disabled until the control path and hardware polarities are fully verified. */
-  HAL_GPIO_WritePin(HEATER_EN_GPIO_Port, HEATER_EN_Pin, HEATER_EN_INACTIVE_LEVEL);
+  /* Phase 3: Set measurement metadata after successful cycle */
+  heater_context.measurement.sequence_id++;
+  heater_context.measurement.timestamp_ms = HAL_GetTick();
+  heater_context.measurement.valid = 1U;
+  heater_context.measurement.age_ms = 0U;
+  heater_context.measurement.error_flags = 0U;
+
+  heater_context.measurement_ready = 1U;
+  heater_measurement_fail_streak = 0U;
+  return 1U;
 }
 
 void Heater_Control_Init(void)
@@ -519,6 +596,30 @@ void Heater_Control_Init(void)
   heater_context.ambient_sensor_ready = 0U;
   heater_context.external_sensor_ready = 0U;
 
+  /* Phase 3: Initialize measurement metadata */
+  heater_context.measurement.sequence_id = 0U;
+  heater_context.measurement.timestamp_ms = 0U;
+  heater_context.measurement.valid = 0U;
+  heater_context.measurement.age_ms = 65535U;
+  heater_context.measurement.error_flags = 0U;
+
+  heater_dwt_delay_ready = 0U;
+  heater_control_integrator_permille = 0;
+  heater_test_ambient_temp_cdeg = HEATER_DEFAULT_AMBIENT_TEMP_CDEG;
+  heater_measurement_fail_streak = 0U;
+
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+  DWT->CYCCNT = 0U;
+
+  if ((CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk) != 0U)
+  {
+    if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) != 0U)
+    {
+      heater_dwt_delay_ready = 1U;
+    }
+  }
+
   Calibration_Init();
   (void)Ina238_Init();
   (void)Mcp9808_Init();
@@ -534,6 +635,8 @@ void Heater_Control_Init(void)
     Error_Handler();
   }
 
+  __HAL_TIM_MOE_ENABLE(&htim1);
+
   Heater_Control_ForceOff();
 #if IRON_VIRTUAL_INTERNAL_ADC || IRON_VIRTUAL_AUX_ADC
   Heater_Control_SetPwmPermille(IRON_SIMULATION_DEFAULT_PWM_PERMILLE);
@@ -547,13 +650,31 @@ void Heater_Control_Init(void)
 
 void Heater_Control_Tick(uint32_t now_ms)
 {
+  uint16_t requested_pwm_permille;
+
+  /* Phase 3: Update measurement age relative to now [ms] */
+  if (heater_context.measurement.valid)
+  {
+    uint32_t age_ms = now_ms - heater_context.measurement.timestamp_ms;
+    /* Clamp to uint16_t max to avoid wraparound at very old measurements */
+    heater_context.measurement.age_ms = (age_ms > 65535U) ? 65535U : (uint16_t)age_ms;
+  }
+
   if ((now_ms - heater_context.last_measurement_tick_ms) < HEATER_MEASUREMENT_PERIOD_MS)
   {
     return;
   }
 
   heater_context.last_measurement_tick_ms = now_ms;
-  Heater_PerformMeasurementSequence();
+  if (Heater_PerformMeasurementSequence() == 0U)
+  {
+    return;
+  }
+
+#if !(IRON_VIRTUAL_INTERNAL_ADC || IRON_VIRTUAL_AUX_ADC)
+  requested_pwm_permille = Heater_ComputeControlPwmPermille();
+  Heater_Control_SetPwmPermille(requested_pwm_permille);
+#endif
 }
 
 void Heater_Control_SetTargetTempCdeg(uint16_t target_temp_cdeg)
@@ -587,11 +708,13 @@ void Heater_Control_ForceOff(void)
 {
   heater_context.pwm_permille = 0U;
   heater_context.simulated_power_watt_x10 = 0U;
+  heater_control_integrator_permille = 0;
   Heater_UpdateBuckBoostReference(0U);
   Heater_ApplyPwm(0U);
-  HAL_GPIO_WritePin(HEATER_EN_GPIO_Port, HEATER_EN_Pin, HEATER_EN_INACTIVE_LEVEL);
+  /* Safety-critical outputs now routed through Safety_Guard */
+  Safety_Guard_ForceSafeOff(HAL_GetTick());
+  /* Legacy TIP_CHECK (non-critical) still set locally for compatibility */
   HAL_GPIO_WritePin(TIP_CHECK_GPIO_Port, TIP_CHECK_Pin, TIP_CHECK_SAFE_LEVEL);
-  HAL_GPIO_WritePin(TIP_CLAMP_GPIO_Port, TIP_CLAMP_Pin, TIP_CLAMP_SAFE_LEVEL);
 }
 
 void Heater_Simulation_Reset(void)
@@ -659,6 +782,26 @@ void Heater_Simulation_SetThermalLoadPermille(uint16_t thermal_load_permille)
 #endif
 }
 
+void Heater_Test_SetAmbientTempCdeg(uint16_t ambient_temp_cdeg)
+{
+  if (ambient_temp_cdeg < HEATER_SIMULATED_MIN_AMBIENT_TEMP_CDEG)
+  {
+    ambient_temp_cdeg = HEATER_SIMULATED_MIN_AMBIENT_TEMP_CDEG;
+  }
+
+  if (ambient_temp_cdeg > HEATER_SIMULATED_MAX_AMBIENT_TEMP_CDEG)
+  {
+    ambient_temp_cdeg = HEATER_SIMULATED_MAX_AMBIENT_TEMP_CDEG;
+  }
+
+  heater_test_ambient_temp_cdeg = ambient_temp_cdeg;
+}
+
+uint16_t Heater_Test_GetAmbientTempCdeg(void)
+{
+  return heater_test_ambient_temp_cdeg;
+}
+
 void Heater_Simulation_SetTipTempCdeg(uint16_t tip_temp_cdeg)
 {
 #if IRON_VIRTUAL_INTERNAL_ADC || IRON_VIRTUAL_AUX_ADC
@@ -682,4 +825,24 @@ void Heater_Simulation_SetTipTempCdeg(uint16_t tip_temp_cdeg)
 const HeaterControlContext *Heater_Control_GetContext(void)
 {
   return &heater_context;
+}
+
+static void Heater_HandleMeasurementFailure(uint16_t error_flag)
+{
+  heater_context.measurement_ready = 0U;
+  heater_context.measurement.valid = 0U;
+  heater_context.measurement.error_flags |= error_flag;
+  heater_measurement_fail_streak++;
+
+  if (heater_measurement_fail_streak >= HEATER_MEAS_FAIL_RECOVERY_THRESHOLD)
+  {
+    /* Recover from rare long-run ADC stuck states observed on bench. */
+    (void)HAL_ADC_Stop(&hadc1);
+    (void)HAL_ADC_Stop(&hadc2);
+    (void)HAL_ADCEx_Calibration_Start(&hadc1, ADC_CALIB_OFFSET_LINEARITY, ADC_SINGLE_ENDED);
+    (void)HAL_ADCEx_Calibration_Start(&hadc2, ADC_CALIB_OFFSET_LINEARITY, ADC_SINGLE_ENDED);
+    heater_measurement_fail_streak = 0U;
+  }
+
+  Heater_Control_ForceOff();
 }

@@ -11,26 +11,89 @@
 #include <stdio.h>
 #include <string.h>
 
+#define DISPLAY_FAULT_COLOR_TEST 0U
+
 enum
 {
   DISPLAY_REFRESH_PERIOD_MS = 16U,
   DISPLAY_HW_RETRY_PERIOD_MS = 5000U,
-  DISPLAY_MAIN_TIP_UPDATE_MS = 120U,
   DISPLAY_MAIN_SET_UPDATE_MS = 250U,
+  DISPLAY_FAULT_HINT_DURATION_MS = 2000U,
+  DISPLAY_TIP_HYSTERESIS_CDEG = 5U,
+  DISPLAY_MAIN_TIP_FIELD_X = 28U,
+  DISPLAY_MAIN_TIP_FIELD_Y = 52U,
+  DISPLAY_MAIN_TIP_FIELD_W = 160U,
+  DISPLAY_MAIN_TIP_FIELD_H = 36U,
+  DISPLAY_MAIN_SET_FIELD_X = 18U,
+  DISPLAY_MAIN_SET_FIELD_Y = 124U,
+  DISPLAY_MAIN_SET_FIELD_W = 160U,
+  DISPLAY_MAIN_SET_FIELD_H = 20U,
+  DISPLAY_FAULT_HINT_FIELD_X = 18U,
+  DISPLAY_FAULT_HINT_FIELD_Y = 132U,
+  DISPLAY_FAULT_HINT_FIELD_W = 190U,
+  DISPLAY_FAULT_HINT_FIELD_H = 16U,
   DISPLAY_COLOR_BLACK = 0x0000U,
+  DISPLAY_COLOR_WHITE = 0xFFFFU,
+  DISPLAY_COLOR_RED = 0xF800U,
+  DISPLAY_COLOR_GREEN = 0x07E0U,
+  DISPLAY_COLOR_BLUE = 0x001FU,
   DISPLAY_COLOR_HEADER_BLUE = 0x001F,
   DISPLAY_COLOR_HEADER_TEXT = 0xFD20U,
   DISPLAY_COLOR_TIP_TEXT = 0xFFFFU,
-  DISPLAY_COLOR_SET_TEXT = 0x07FFU
+  DISPLAY_COLOR_SET_TEXT = 0x07FFU,
+  DISPLAY_FAULT_COLOR_TEST_PERIOD_MS = 1000U
 };
 
 static DisplayContext display_context;
 static uint32_t display_last_hw_init_attempt_ms;
 static uint32_t display_last_tip_draw_ms;
 static uint32_t display_last_set_draw_ms;
+static uint32_t display_last_ui_event_counter;
+static uint32_t display_fault_ack_rejected_until_ms;
 static uint8_t display_main_layout_drawn;
+static uint8_t display_fault_layout_drawn;
 static int16_t display_tip_shown_deg;
 static int16_t display_set_shown_deg;
+
+static const char *Display_GetPrimaryFaultText(uint32_t fault_flags)
+{
+  if ((fault_flags & STATION_FAULT_OVERCURRENT) != 0U)
+  {
+    return "OVERCURRENT";
+  }
+
+  if ((fault_flags & STATION_FAULT_BUCKBOOST) != 0U)
+  {
+    return "BUCKBOOST";
+  }
+
+  if ((fault_flags & STATION_FAULT_OPAMP_PGOOD) != 0U)
+  {
+    return "OPAMP_PGOOD";
+  }
+
+  if ((fault_flags & STATION_FAULT_TIP_OVERTEMP) != 0U)
+  {
+    return "TIP_OVERTEMP";
+  }
+
+  if ((fault_flags & STATION_FAULT_AMBIENT_OVERTEMP) != 0U)
+  {
+    return "AMBIENT_OT";
+  }
+
+  if ((fault_flags & STATION_FAULT_AMBIENT_SENSOR) != 0U)
+  {
+    return "AMBIENT_SENSOR";
+  }
+
+  if ((fault_flags & STATION_FAULT_INJECTED) != 0U)
+  {
+    return "INJECTED";
+  }
+
+  return "UNKNOWN";
+}
 
 static const char *Display_GetOperatingModeName(StationOperatingMode mode)
 {
@@ -105,7 +168,10 @@ void Display_Init(void)
   display_last_hw_init_attempt_ms = HAL_GetTick();
   display_last_tip_draw_ms = 0U;
   display_last_set_draw_ms = 0U;
+  display_last_ui_event_counter = 0U;
+  display_fault_ack_rejected_until_ms = 0U;
   display_main_layout_drawn = 0U;
+  display_fault_layout_drawn = 0U;
   display_tip_shown_deg = -32768;
   display_set_shown_deg = -32768;
   (void)St7789_Init();
@@ -114,6 +180,7 @@ void Display_Init(void)
 void Display_Tick(uint32_t now_ms)
 {
   const HeaterControlContext *heater = Heater_Control_GetContext();
+  const StationContext *station = Station_App_GetContext();
   const UiContext *ui = Ui_GetContext();
   const CalibrationSessionContext *session = Calibration_GetSessionContext();
   char line_buffer[DISPLAY_LINE_LENGTH];
@@ -136,6 +203,121 @@ void Display_Tick(uint32_t now_ms)
     display_last_hw_init_attempt_ms = now_ms;
     (void)St7789_Init();
   }
+
+  if (ui->event_counter != display_last_ui_event_counter)
+  {
+    display_last_ui_event_counter = ui->event_counter;
+
+    if (((UiEvent)ui->last_event == UI_EVENT_FAULT_ACK_RESULT) && (ui->event_value == 0U))
+    {
+      display_fault_ack_rejected_until_ms = now_ms + DISPLAY_FAULT_HINT_DURATION_MS;
+    }
+  }
+
+  if (station->state == STATION_STATE_FAULT)
+  {
+#if DISPLAY_FAULT_COLOR_TEST
+    uint16_t fill_color;
+    uint32_t phase = (now_ms / DISPLAY_FAULT_COLOR_TEST_PERIOD_MS) % 5U;
+
+    switch (phase)
+    {
+      case 0U:
+        fill_color = DISPLAY_COLOR_BLACK;
+        break;
+
+      case 1U:
+        fill_color = DISPLAY_COLOR_WHITE;
+        break;
+
+      case 2U:
+        fill_color = DISPLAY_COLOR_BLUE;
+        break;
+
+      case 3U:
+        fill_color = DISPLAY_COLOR_GREEN;
+        break;
+
+      default:
+        fill_color = DISPLAY_COLOR_RED;
+        break;
+    }
+
+    display_main_layout_drawn = 0U;
+
+    if (St7789_GetContext()->initialized != 0U)
+    {
+      (void)St7789_FillScreen(fill_color);
+    }
+
+    display_context.version++;
+    return;
+#else
+    const char *fault_text = Display_GetPrimaryFaultText(station->fault_flags);
+    const char *fault_hint_text = (display_fault_ack_rejected_until_ms > now_ms) ? "FAULT STILL ACTIVE" : "HOLD TO ACK";
+
+    display_main_layout_drawn = 0U;
+
+    if ((display_fault_layout_drawn == 0U) && (St7789_GetContext()->initialized != 0U))
+    {
+      (void)St7789_FillScreen(DISPLAY_COLOR_BLACK);
+      (void)St7789_DrawText(18U, 18U, "SYSTEM FAULT", DISPLAY_COLOR_HEADER_TEXT, DISPLAY_COLOR_BLACK, 2U);
+      (void)St7789_DrawText(18U, 56U, fault_text, DISPLAY_COLOR_TIP_TEXT, DISPLAY_COLOR_BLACK, 3U);
+      (void)St7789_DrawText(18U, 102U, "HEATER OFF", DISPLAY_COLOR_SET_TEXT, DISPLAY_COLOR_BLACK, 2U);
+      display_fault_layout_drawn = 1U;
+      display_context.lines[0][0] = '\0';
+      display_context.lines[1][0] = '\0';
+      display_context.lines[2][0] = '\0';
+      display_context.lines[3][0] = '\0';
+    }
+
+    (void)snprintf(line_buffer, sizeof(line_buffer), "SYSTEM FAULT");
+    if (Display_SetLine(0U, line_buffer) != 0U)
+    {
+      changed_mask |= (uint8_t)(1U << 0U);
+    }
+
+    (void)snprintf(line_buffer, sizeof(line_buffer), "%s", fault_text);
+    if (Display_SetLine(1U, line_buffer) != 0U)
+    {
+      changed_mask |= (uint8_t)(1U << 1U);
+    }
+
+    (void)snprintf(line_buffer, sizeof(line_buffer), "HEATER OFF");
+    if (Display_SetLine(2U, line_buffer) != 0U)
+    {
+      changed_mask |= (uint8_t)(1U << 2U);
+    }
+
+    (void)snprintf(line_buffer, sizeof(line_buffer), "%s", fault_hint_text);
+    if (Display_SetLine(3U, line_buffer) != 0U)
+    {
+      changed_mask |= (uint8_t)(1U << 3U);
+    }
+
+    if ((St7789_GetContext()->initialized != 0U) && ((changed_mask & (uint8_t)(1U << 1U)) != 0U))
+    {
+      (void)St7789_DrawTextField(18U, 56U, 190U, 18U, fault_text, DISPLAY_COLOR_TIP_TEXT, DISPLAY_COLOR_BLACK, 3U);
+    }
+
+    if ((St7789_GetContext()->initialized != 0U) && ((changed_mask & (uint8_t)(1U << 3U)) != 0U))
+    {
+      (void)St7789_DrawTextField(DISPLAY_FAULT_HINT_FIELD_X,
+                                 DISPLAY_FAULT_HINT_FIELD_Y,
+                                 DISPLAY_FAULT_HINT_FIELD_W,
+                                 DISPLAY_FAULT_HINT_FIELD_H,
+                                 fault_hint_text,
+                                 DISPLAY_COLOR_SET_TEXT,
+                                 DISPLAY_COLOR_BLACK,
+                                 2U);
+    }
+
+    display_context.version++;
+    return;
+#endif
+  }
+
+  display_fault_layout_drawn = 0U;
 
   if ((DisplayPage)display_context.page == DISPLAY_PAGE_MAIN || ui->screen == UI_SCREEN_MAIN)
   {
@@ -165,14 +347,15 @@ void Display_Tick(uint32_t now_ms)
     }
     else
     {
-      int16_t tip_actual_deg = (int16_t)(heater->tip_temp_cdeg / 10U);
+      int16_t tip_actual_deg;
       int16_t set_actual_deg = (int16_t)(ui->target_temp_cdeg / 10U);
       uint8_t tip_due = 0U;
       uint8_t set_due = 0U;
+      tip_actual_deg = (int16_t)((heater->tip_temp_cdeg + 5U) / 10U);
 
       if ((display_main_layout_drawn == 0U) && (St7789_GetContext()->initialized != 0U))
       {
-        (void)St7789_ClearArea(0U, 0U, 320U, 170U, DISPLAY_COLOR_BLACK);
+        (void)St7789_FillScreen(DISPLAY_COLOR_BLACK);
         (void)St7789_ClearArea(0U, 0U, 320U, 28U, DISPLAY_COLOR_HEADER_BLUE);
         (void)St7789_DrawText(12U, 8U, "SOLDERING IRON", DISPLAY_COLOR_HEADER_TEXT, DISPLAY_COLOR_HEADER_BLUE, 2U);
         display_main_layout_drawn = 1U;
@@ -184,25 +367,39 @@ void Display_Tick(uint32_t now_ms)
 
       if (display_tip_shown_deg == -32768)
       {
-        display_tip_shown_deg = tip_actual_deg;
-      }
-
-      if ((now_ms - display_last_tip_draw_ms) >= DISPLAY_MAIN_TIP_UPDATE_MS)
-      {
         display_last_tip_draw_ms = now_ms;
         tip_due = 1U;
+        display_tip_shown_deg = tip_actual_deg;
+      }
+      else
+      {
+        int32_t shown_cdeg = (int32_t)display_tip_shown_deg * 10;
+        int32_t rise_threshold_cdeg = shown_cdeg + 5 + DISPLAY_TIP_HYSTERESIS_CDEG;
+        int32_t fall_threshold_cdeg = shown_cdeg - 5 - DISPLAY_TIP_HYSTERESIS_CDEG;
 
-        if (tip_actual_deg > display_tip_shown_deg)
+        if ((int32_t)heater->tip_temp_cdeg >= rise_threshold_cdeg)
         {
-          display_tip_shown_deg++;
+          tip_actual_deg = (int16_t)((heater->tip_temp_cdeg + 5U) / 10U);
+          if (tip_actual_deg != display_tip_shown_deg)
+          {
+            display_last_tip_draw_ms = now_ms;
+            tip_due = 1U;
+            display_tip_shown_deg = tip_actual_deg;
+          }
         }
-        else if (tip_actual_deg < display_tip_shown_deg)
+        else if ((int32_t)heater->tip_temp_cdeg <= fall_threshold_cdeg)
         {
-          display_tip_shown_deg--;
+          tip_actual_deg = (int16_t)((heater->tip_temp_cdeg + 5U) / 10U);
+          if (tip_actual_deg != display_tip_shown_deg)
+          {
+            display_last_tip_draw_ms = now_ms;
+            tip_due = 1U;
+            display_tip_shown_deg = tip_actual_deg;
+          }
         }
       }
 
-      if (((now_ms - display_last_set_draw_ms) >= DISPLAY_MAIN_SET_UPDATE_MS) || (set_actual_deg != display_set_shown_deg))
+      if ((display_set_shown_deg == -32768) || (set_actual_deg != display_set_shown_deg))
       {
         display_last_set_draw_ms = now_ms;
         display_set_shown_deg = set_actual_deg;
@@ -211,16 +408,28 @@ void Display_Tick(uint32_t now_ms)
 
       if ((St7789_GetContext()->initialized != 0U) && (tip_due != 0U))
       {
-        (void)St7789_ClearArea(8U, 42U, 304U, 66U, DISPLAY_COLOR_BLACK);
         (void)snprintf(line_buffer, sizeof(line_buffer), "%dC", (int)display_tip_shown_deg);
-        (void)St7789_DrawText(28U, 52U, line_buffer, DISPLAY_COLOR_TIP_TEXT, DISPLAY_COLOR_BLACK, 6U);
+        (void)St7789_DrawTextField(DISPLAY_MAIN_TIP_FIELD_X,
+                                   DISPLAY_MAIN_TIP_FIELD_Y,
+                                   DISPLAY_MAIN_TIP_FIELD_W,
+                                   DISPLAY_MAIN_TIP_FIELD_H,
+                                   line_buffer,
+                                   DISPLAY_COLOR_TIP_TEXT,
+                                   DISPLAY_COLOR_BLACK,
+                                   6U);
       }
 
       if ((St7789_GetContext()->initialized != 0U) && (set_due != 0U))
       {
-        (void)St7789_ClearArea(8U, 118U, 304U, 38U, DISPLAY_COLOR_BLACK);
         (void)snprintf(line_buffer, sizeof(line_buffer), "SET %dC", (int)display_set_shown_deg);
-        (void)St7789_DrawText(18U, 124U, line_buffer, DISPLAY_COLOR_SET_TEXT, DISPLAY_COLOR_BLACK, 3U);
+        (void)St7789_DrawTextField(DISPLAY_MAIN_SET_FIELD_X,
+                                   DISPLAY_MAIN_SET_FIELD_Y,
+                                   DISPLAY_MAIN_SET_FIELD_W,
+                                   DISPLAY_MAIN_SET_FIELD_H,
+                                   line_buffer,
+                                   DISPLAY_COLOR_SET_TEXT,
+                                   DISPLAY_COLOR_BLACK,
+                                   3U);
       }
 
       display_context.version++;

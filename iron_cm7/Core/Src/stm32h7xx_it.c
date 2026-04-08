@@ -22,6 +22,9 @@
 #include "stm32h7xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "peripherals.h"
+#include "safety_guard.h"
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -55,6 +58,7 @@
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
+extern TIM_HandleTypeDef htim17;
 
 /* USER CODE BEGIN EV */
 
@@ -69,12 +73,11 @@
 void NMI_Handler(void)
 {
   /* USER CODE BEGIN NonMaskableInt_IRQn 0 */
-
+  Safety_Guard_ForceSafeOff(HAL_GetTick());
+  NVIC_SystemReset();
   /* USER CODE END NonMaskableInt_IRQn 0 */
   /* USER CODE BEGIN NonMaskableInt_IRQn 1 */
-   while (1)
-  {
-  }
+
   /* USER CODE END NonMaskableInt_IRQn 1 */
 }
 
@@ -84,7 +87,30 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
+  uint32_t *fault_args;
+  char buf[96];
+  int len;
 
+  __asm volatile (
+      "tst lr, #4\n"
+      "ite eq\n"
+      "mrseq %0, msp\n"
+      "mrsne %0, psp\n"
+      : "=r" (fault_args)
+  );
+
+  Safety_Guard_ForceSafeOff(HAL_GetTick());
+
+  len = snprintf(buf, sizeof(buf),
+                 "\r\nHARDFAULT PC=%08lX LR=%08lX CFSR=%08lX HFSR=%08lX\r\n",
+                 fault_args[6], fault_args[5],
+                 (unsigned long)SCB->CFSR, (unsigned long)SCB->HFSR);
+  if (len > 0)
+  {
+    (void)HAL_UART_Transmit(&huart3, (uint8_t *)buf, (uint16_t)len, 1000U);
+  }
+
+  NVIC_SystemReset();
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
@@ -99,7 +125,8 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
+  Safety_Guard_ForceSafeOff(HAL_GetTick());
+  NVIC_SystemReset();
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
@@ -114,7 +141,8 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
-
+  Safety_Guard_ForceSafeOff(HAL_GetTick());
+  NVIC_SystemReset();
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
   {
@@ -129,7 +157,8 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
-
+  Safety_Guard_ForceSafeOff(HAL_GetTick());
+  NVIC_SystemReset();
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
   {
@@ -197,6 +226,14 @@ void SysTick_Handler(void)
 /* For the available peripheral interrupt handler names,                      */
 /* please refer to the startup file (startup_stm32h7xx.s).                    */
 /******************************************************************************/
+
+/**
+  * @brief This function handles TIM17 global interrupt.
+  */
+void TIM17_IRQHandler(void)
+{
+  HAL_TIM_IRQHandler(&htim17);
+}
 
 /**
   * @brief This function handles EXTI line[15:10] interrupts.

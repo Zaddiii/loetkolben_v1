@@ -3,8 +3,27 @@
 
 #include <stdint.h>
 
+/**
+ * Measurement metadata: sequence tracking, freshness, and error flags.
+ * Enables explicit control-path decisions based on measurement age/validity.
+ */
 typedef struct
 {
+  uint32_t sequence_id;        ///< Monotonic sequence number per completed measurement cycle
+  uint32_t timestamp_ms;       ///< HAL_GetTick() when measurement completed
+  uint8_t  valid;              ///< 1 if measurement passed all sanity checks, 0 otherwise
+  uint16_t age_ms;             ///< Age of measurement relative to now [ms], clamped to 65535
+  uint16_t error_flags;        ///< Bitmask: ADC errors, sensor errors, timeout errors, etc.
+} MeasurementMetadata;
+
+/**
+ * Heater control context: sensor readings, control outputs, simulation state.
+ */
+typedef struct
+{
+  /* Measurement metadata (Phase 3) */
+  MeasurementMetadata measurement;
+
   uint32_t last_measurement_tick_ms;
   uint16_t latest_samples[8];
   uint16_t filtered_raw;
@@ -47,6 +66,8 @@ void Heater_Simulation_Reset(void);
 void Heater_Simulation_SetAmbientTempCdeg(uint16_t ambient_temp_cdeg);
 void Heater_Simulation_SetThermalLoadPermille(uint16_t thermal_load_permille);
 void Heater_Simulation_SetTipTempCdeg(uint16_t tip_temp_cdeg);
+void Heater_Test_SetAmbientTempCdeg(uint16_t ambient_temp_cdeg);
+uint16_t Heater_Test_GetAmbientTempCdeg(void);
 const HeaterControlContext *Heater_Control_GetContext(void);
 
 #endif

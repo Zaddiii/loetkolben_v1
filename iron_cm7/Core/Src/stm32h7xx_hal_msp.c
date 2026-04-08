@@ -163,6 +163,10 @@ void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef *htim_pwm)
   {
     __HAL_RCC_TIM1_CLK_ENABLE();
   }
+  else if (htim_pwm->Instance == TIM15)
+  {
+    __HAL_RCC_TIM15_CLK_ENABLE();
+  }
   else if (htim_pwm->Instance == TIM3)
   {
     __HAL_RCC_TIM3_CLK_ENABLE();
@@ -209,6 +213,27 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef *htim_base)
   }
 }
 
+void HAL_TIM_IC_MspInit(TIM_HandleTypeDef *htim_ic)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  if (htim_ic->Instance == TIM17)
+  {
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    __HAL_RCC_TIM17_CLK_ENABLE();
+
+    GPIO_InitStruct.Pin = FAN_TACHO_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF1_TIM17;
+    HAL_GPIO_Init(FAN_TACHO_GPIO_Port, &GPIO_InitStruct);
+
+    HAL_NVIC_SetPriority(TIM17_IRQn, 14, 0);
+    HAL_NVIC_EnableIRQ(TIM17_IRQn);
+  }
+}
+
 void HAL_TIM_Encoder_MspInit(TIM_HandleTypeDef *htim_encoder)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -240,7 +265,15 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim)
     __HAL_RCC_GPIOE_CLK_ENABLE();
     GPIO_InitStruct.Pin = HEATER_PWM_Pin;
     GPIO_InitStruct.Alternate = GPIO_AF1_TIM1;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
     HAL_GPIO_Init(HEATER_PWM_GPIO_Port, &GPIO_InitStruct);
+  }
+  else if (htim->Instance == TIM15)
+  {
+    __HAL_RCC_GPIOE_CLK_ENABLE();
+    GPIO_InitStruct.Pin = FAN_PWM_Pin;
+    GPIO_InitStruct.Alternate = GPIO_AF4_TIM15;
+    HAL_GPIO_Init(FAN_PWM_GPIO_Port, &GPIO_InitStruct);
   }
   else if (htim->Instance == TIM3)
   {

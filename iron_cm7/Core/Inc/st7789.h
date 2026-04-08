@@ -18,6 +18,7 @@ bool St7789_Init(void);
 bool St7789_FillScreen(uint16_t rgb565);
 bool St7789_ClearArea(uint16_t x, uint16_t y, uint16_t width, uint16_t height, uint16_t rgb565);
 bool St7789_DrawText(uint16_t x, uint16_t y, const char *text, uint16_t fg_color, uint16_t bg_color, uint8_t scale);
+bool St7789_DrawTextField(uint16_t x, uint16_t y, uint16_t width, uint16_t height, const char *text, uint16_t fg_color, uint16_t bg_color, uint8_t scale);
 bool St7789_DrawTextLine(uint8_t line_index, const char *text);
 void St7789_SetBacklightPermille(uint16_t backlight_permille);
 const St7789Context *St7789_GetContext(void);

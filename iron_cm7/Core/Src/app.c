@@ -5,6 +5,7 @@
 #include "ina238.h"
 #include "main.h"
 #include "mcp9808.h"
+#include "safety_guard.h"
 #include "storage.h"
 
 #include <string.h>
@@ -29,6 +30,48 @@ static uint32_t station_pending_runstate_since_ms;
 static uint8_t station_simulated_docked;
 static StationState station_pending_state;
 static StationOperatingMode station_pending_operating_mode;
+
+static uint32_t Station_FilterCriticalFaults(uint32_t fault_flags)
+{
+  return fault_flags & STATION_FAULT_CRITICAL_MASK;
+}
+
+static uint32_t Station_MapIgnoredFaultsToWarnings(uint32_t fault_flags)
+{
+  uint32_t warning_flags = 0U;
+
+  if ((fault_flags & STATION_FAULT_BUCKBOOST) != 0U)
+  {
+    warning_flags |= STATION_WARNING_FAULT_BUCKBOOST_IGNORED;
+  }
+
+  if ((fault_flags & STATION_FAULT_OPAMP_PGOOD) != 0U)
+  {
+    warning_flags |= STATION_WARNING_FAULT_OPAMP_PGOOD_IGNORED;
+  }
+
+  if ((fault_flags & STATION_FAULT_TIP_OVERTEMP) != 0U)
+  {
+    warning_flags |= STATION_WARNING_FAULT_TIP_OVERTEMP_IGNORED;
+  }
+
+  if ((fault_flags & STATION_FAULT_AMBIENT_OVERTEMP) != 0U)
+  {
+    warning_flags |= STATION_WARNING_FAULT_AMBIENT_OVERTEMP_IGNORED;
+  }
+
+  if ((fault_flags & STATION_FAULT_AMBIENT_SENSOR) != 0U)
+  {
+    warning_flags |= STATION_WARNING_FAULT_AMBIENT_SENSOR_IGNORED;
+  }
+
+  if ((fault_flags & STATION_FAULT_INJECTED) != 0U)
+  {
+    warning_flags |= STATION_WARNING_FAULT_INJECTED_IGNORED;
+  }
+
+  return warning_flags;
+}
 
 static uint8_t Station_ReadDockInput(void)
 {
@@ -323,13 +366,26 @@ static uint32_t Station_EvaluateWarnings(const HeaterControlContext *heater)
 
 static void Station_UpdateFaultStatus(const HeaterControlContext *heater, uint32_t now_ms)
 {
-  uint32_t active_fault_flags = Station_ReadHardwareFaultInputs();
+  uint32_t all_fault_flags = Station_ReadHardwareFaultInputs();
+  uint32_t active_fault_flags;
 
-  active_fault_flags |= Station_EvaluateDerivedFaults(heater, now_ms);
-  active_fault_flags |= station_forced_fault_flags;
+  /*
+   * Startup robustness: while heater output is still inactive, external power
+   * path status lines can be transient. Do not latch BUCKBOOST/OPAMP faults
+   * before the control loop actually drives heater power.
+   */
+  if ((heater != NULL) && (heater->pwm_permille == 0U))
+  {
+    all_fault_flags &= ~(STATION_FAULT_BUCKBOOST | STATION_FAULT_OPAMP_PGOOD);
+  }
+
+  all_fault_flags |= Station_EvaluateDerivedFaults(heater, now_ms);
+  all_fault_flags |= station_forced_fault_flags;
+  active_fault_flags = Station_FilterCriticalFaults(all_fault_flags);
 
   station_context.active_fault_flags = active_fault_flags;
   station_context.warning_flags = Station_EvaluateWarnings(heater);
+  station_context.warning_flags |= Station_MapIgnoredFaultsToWarnings(all_fault_flags & ~STATION_FAULT_CRITICAL_MASK);
 
   if (active_fault_flags != 0U)
   {
@@ -412,12 +468,35 @@ void Station_App_Tick(uint32_t now_ms)
   }
 
   station_context.last_tick_ms = now_ms;
+
+  /* Evaluate safety-critical faults before any heater control update. */
+  Station_UpdateFaultStatus(Heater_Control_GetContext(), now_ms);
+
+  /* In FAULT state keep hard-safe outputs stable and skip heater sequencing. */
+  if ((station_context.state == STATION_STATE_FAULT) ||
+      (station_context.fault_flags != 0U) ||
+      (station_context.active_fault_flags != 0U))
+  {
+    station_context.state = STATION_STATE_FAULT;
+    station_context.operating_mode = STATION_OPERATING_MODE_FAULT;
+    Station_SafeShutdown();
+    return;
+  }
+
   Station_UpdateControlTarget(Heater_Control_GetContext());
   Heater_Control_Tick(now_ms);
   heater = Heater_Control_GetContext();
   Station_UpdateControlTarget(heater);
   station_context.calibration_valid = heater->calibration_valid;
   Station_UpdateFaultStatus(heater, now_ms);
+
+  if (station_context.active_fault_flags != 0U)
+  {
+    station_context.state = STATION_STATE_FAULT;
+    station_context.operating_mode = STATION_OPERATING_MODE_FAULT;
+    Station_SafeShutdown();
+    return;
+  }
 
   if (station_context.fault_flags != 0U)
   {
@@ -432,9 +511,11 @@ void Station_App_Tick(uint32_t now_ms)
 
 void Station_SafeShutdown(void)
 {
-  HAL_GPIO_WritePin(HEATER_EN_GPIO_Port, HEATER_EN_Pin, HEATER_EN_INACTIVE_LEVEL);
+  /* Route safety-critical outputs through Safety_Guard */
+  Safety_Guard_ForceSafeOff(HAL_GetTick());
+  
+  /* Legacy TIP_CHECK (non-critical monitoring) still set locally for compatibility */
   HAL_GPIO_WritePin(TIP_CHECK_GPIO_Port, TIP_CHECK_Pin, TIP_CHECK_SAFE_LEVEL);
-  HAL_GPIO_WritePin(TIP_CLAMP_GPIO_Port, TIP_CLAMP_Pin, TIP_CLAMP_SAFE_LEVEL);
 }
 
 void Station_App_RequestFault(uint32_t fault_mask)
@@ -457,6 +538,7 @@ void Station_App_ClearFault(uint32_t fault_mask)
 
 uint8_t Station_App_AcknowledgeFaults(uint32_t clearable_fault_mask)
 {
+  clearable_fault_mask &= STATION_FAULT_ACK_MASK;
   station_forced_fault_flags &= ~clearable_fault_mask;
   Station_UpdateFaultStatus(Heater_Control_GetContext(), HAL_GetTick());
 
@@ -467,6 +549,11 @@ uint8_t Station_App_AcknowledgeFaults(uint32_t clearable_fault_mask)
 
   station_context.fault_flags = 0U;
   station_context.fault_ack_pending = 0U;
+  station_context.state = STATION_STATE_IDLE;
+  station_context.operating_mode = STATION_OPERATING_MODE_IDLE;
+  station_pending_state = STATION_STATE_IDLE;
+  station_pending_operating_mode = STATION_OPERATING_MODE_IDLE;
+  station_pending_runstate_since_ms = HAL_GetTick();
   return 1U;
 }
 

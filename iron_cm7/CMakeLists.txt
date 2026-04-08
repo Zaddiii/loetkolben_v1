@@ -60,6 +60,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/app.c
     Core/Src/calibration.c
+    Core/Src/debug_console.c
     Core/Src/display.c
     Core/Src/fan.c
     Core/Src/heater.c
@@ -70,6 +71,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/st7789.c
     Core/Src/storage.c
     Core/Src/ui.c
+    Core/Src/safety_guard.c
 )
 
 # Link directories setup

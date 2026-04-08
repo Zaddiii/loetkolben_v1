@@ -6,6 +6,8 @@ Das vorhandene Repository ist im Moment ein Dual-Core-STM32CubeMX-Projekt mit ei
 
 Das Konzept in `docs/anforderung loetkolben.txt` ist fuer eine deutlich andere Zielhardware geschrieben als das aktuelle Nucleo-Testsetup in `nucleotest.ioc`.
 
+Fuer die systematische technische Bereinigung und den geplanten strukturellen Umbau der `iron_cm7`-Firmware gibt es zusaetzlich das Arbeitsdokument `docs/iron-refactoring-plan.md`.
+
 ## WICHTIGER NUCLEO-PIN-HINWEIS NICHT VERGESSEN
 
 - Auf dem NUCLEO-H755ZI-Q sind PD8/PD9 fuer ST-LINK VCP und USART3-Debug reserviert.

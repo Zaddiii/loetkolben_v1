@@ -35,7 +35,9 @@ enum
   ST7789_CHAR_HEIGHT = 5U,
   ST7789_CHAR_SCALE = 2U,
   ST7789_CHAR_SPACING = 2U,
-  ST7789_FILL_CHUNK_PIXELS = 64U
+  ST7789_FILL_CHUNK_PIXELS = 64U,
+  ST7789_TEXT_FIELD_BUFFER_MAX_WIDTH = 192U,
+  ST7789_TEXT_FIELD_BUFFER_MAX_HEIGHT = 40U
 };
 
 enum
@@ -47,6 +49,65 @@ enum
 };
 
 static St7789Context st7789_context;
+static uint16_t st7789_text_field_buffer[ST7789_TEXT_FIELD_BUFFER_MAX_WIDTH * ST7789_TEXT_FIELD_BUFFER_MAX_HEIGHT];
+
+static void St7789_Select(void);
+static void St7789_Deselect(void);
+static bool St7789_SetAddressWindow(uint16_t x, uint16_t y, uint16_t width, uint16_t height);
+static void St7789_GetGlyphRows(char character, uint8_t rows[ST7789_CHAR_HEIGHT]);
+
+static bool St7789_WritePixelBuffer(uint16_t x, uint16_t y, uint16_t width, uint16_t height, const uint16_t *pixels)
+{
+  uint8_t tx_chunk[ST7789_FILL_CHUNK_PIXELS * 2U];
+  HAL_StatusTypeDef status = HAL_OK;
+  uint32_t pixel_count;
+  uint32_t pixel_index = 0U;
+
+  if ((pixels == NULL) || (width == 0U) || (height == 0U))
+  {
+    return false;
+  }
+
+  if (!St7789_SetAddressWindow(x, y, width, height))
+  {
+    return false;
+  }
+
+  pixel_count = (uint32_t)width * (uint32_t)height;
+
+  HAL_GPIO_WritePin(DISPLAY_DC_GPIO_Port, DISPLAY_DC_Pin, GPIO_PIN_SET);
+  St7789_Select();
+
+  while (pixel_index < pixel_count)
+  {
+    uint16_t chunk_pixels = (uint16_t)(pixel_count - pixel_index);
+    uint16_t chunk_index;
+
+    if (chunk_pixels > ST7789_FILL_CHUNK_PIXELS)
+    {
+      chunk_pixels = ST7789_FILL_CHUNK_PIXELS;
+    }
+
+    for (chunk_index = 0U; chunk_index < chunk_pixels; ++chunk_index)
+    {
+      uint16_t pixel = pixels[pixel_index + chunk_index];
+
+      tx_chunk[chunk_index * 2U] = (uint8_t)(pixel >> 8);
+      tx_chunk[chunk_index * 2U + 1U] = (uint8_t)(pixel & 0xFFU);
+    }
+
+    status = HAL_SPI_Transmit(&hspi2, tx_chunk, (uint16_t)(chunk_pixels * 2U), ST7789_SPI_TIMEOUT_MS);
+    if (status != HAL_OK)
+    {
+      break;
+    }
+
+    pixel_index += chunk_pixels;
+  }
+
+  St7789_Deselect();
+  return status == HAL_OK;
+}
 
 static void St7789_Select(void)
 {
@@ -426,6 +487,96 @@ bool St7789_DrawText(uint16_t x, uint16_t y, const char *text, uint16_t fg_color
     {
       break;
     }
+  }
+
+  st7789_context.last_error = ST7789_ERROR_NONE;
+  st7789_context.last_hal_status = (uint8_t)HAL_OK;
+  return true;
+}
+
+bool St7789_DrawTextField(uint16_t x, uint16_t y, uint16_t width, uint16_t height, const char *text, uint16_t fg_color, uint16_t bg_color, uint8_t scale)
+{
+  size_t text_index;
+  size_t text_length;
+  uint32_t pixel_count;
+  uint16_t origin_x = 0U;
+
+  if ((text == NULL) || (scale == 0U) || (width == 0U) || (height == 0U))
+  {
+    st7789_context.last_error = ST7789_ERROR_ARGUMENT;
+    return false;
+  }
+
+  if ((width > ST7789_TEXT_FIELD_BUFFER_MAX_WIDTH) || (height > ST7789_TEXT_FIELD_BUFFER_MAX_HEIGHT))
+  {
+    st7789_context.last_error = ST7789_ERROR_ARGUMENT;
+    return false;
+  }
+
+  if (st7789_context.initialized == 0U)
+  {
+    return false;
+  }
+
+  pixel_count = (uint32_t)width * (uint32_t)height;
+  for (text_index = 0U; text_index < pixel_count; ++text_index)
+  {
+    st7789_text_field_buffer[text_index] = bg_color;
+  }
+
+  text_length = strlen(text);
+  for (text_index = 0U; text_index < text_length; ++text_index)
+  {
+    uint8_t rows[ST7789_CHAR_HEIGHT];
+    uint16_t char_x = (uint16_t)(origin_x + text_index * (ST7789_CHAR_WIDTH * scale + ST7789_CHAR_SPACING));
+    uint8_t row;
+    uint8_t column;
+
+    if ((char_x + (ST7789_CHAR_WIDTH * scale)) > width)
+    {
+      break;
+    }
+
+    St7789_GetGlyphRows(text[text_index], rows);
+
+    for (row = 0U; row < ST7789_CHAR_HEIGHT; ++row)
+    {
+      for (column = 0U; column < ST7789_CHAR_WIDTH; ++column)
+      {
+        if ((rows[row] & (1U << (ST7789_CHAR_WIDTH - 1U - column))) != 0U)
+        {
+          uint8_t scale_y;
+          uint8_t scale_x;
+
+          for (scale_y = 0U; scale_y < scale; ++scale_y)
+          {
+            uint16_t pixel_y = (uint16_t)(row * scale + scale_y);
+
+            if (pixel_y >= height)
+            {
+              continue;
+            }
+
+            for (scale_x = 0U; scale_x < scale; ++scale_x)
+            {
+              uint16_t pixel_x = (uint16_t)(char_x + column * scale + scale_x);
+
+              if (pixel_x < width)
+              {
+                st7789_text_field_buffer[(uint32_t)pixel_y * width + pixel_x] = fg_color;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (!St7789_WritePixelBuffer(x, y, width, height, st7789_text_field_buffer))
+  {
+    st7789_context.last_error = ST7789_ERROR_SPI;
+    st7789_context.last_hal_status = (uint8_t)hspi2.ErrorCode;
+    return false;
   }
 
   st7789_context.last_error = ST7789_ERROR_NONE;

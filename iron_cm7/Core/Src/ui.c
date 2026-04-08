@@ -60,6 +60,11 @@ static void Ui_SetTargetTemp(int32_t target_temp_cdeg, uint32_t now_ms)
 
 static void Ui_HandleEncoderDetents(int16_t detents, uint32_t now_ms)
 {
+  if (Station_App_GetContext()->state == STATION_STATE_FAULT)
+  {
+    return;
+  }
+
   if (detents == 0)
   {
     return;
@@ -139,6 +144,11 @@ static void Ui_ExecuteMenuAction(void)
 
 static void Ui_HandleShortPress(void)
 {
+  if (Station_App_GetContext()->state == STATION_STATE_FAULT)
+  {
+    return;
+  }
+
   if (ui_context.screen == UI_SCREEN_MAIN)
   {
     Ui_EnterMenu();
@@ -166,7 +176,8 @@ static void Ui_HandleLongPress(void)
 
   if (Station_App_GetContext()->state == STATION_STATE_FAULT)
   {
-    Ui_PublishEvent(UI_EVENT_FAULT_ACK_RESULT, Station_App_AcknowledgeFaults(STATION_FAULT_INJECTED));
+    Ui_PublishEvent(UI_EVENT_FAULT_CLEAR_REQUESTED, 0U);
+    Ui_PublishEvent(UI_EVENT_FAULT_ACK_RESULT, Station_App_AcknowledgeFaults(STATION_FAULT_ACK_MASK));
     return;
   }
 
@@ -196,12 +207,19 @@ void Ui_Init(uint8_t status_stream_enabled)
 
 void Ui_Tick(uint32_t now_ms)
 {
+  const StationContext *station = Station_App_GetContext();
   uint16_t encoder_counter = (uint16_t)__HAL_TIM_GET_COUNTER(&htim5);
   int16_t encoder_delta = (int16_t)(encoder_counter - ui_last_encoder_counter);
   GPIO_PinState button_level = HAL_GPIO_ReadPin(ENCODER_SW_GPIO_Port, ENCODER_SW_Pin);
 
   ui_last_encoder_counter = encoder_counter;
   ui_context.target_temp_cdeg = Heater_Control_GetContext()->target_temp_cdeg;
+
+  if (station->state == STATION_STATE_FAULT)
+  {
+    ui_context.screen = UI_SCREEN_MAIN;
+    ui_context.save_pending = 0U;
+  }
 
   if (encoder_delta != 0)
   {

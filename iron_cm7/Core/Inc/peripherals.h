@@ -11,6 +11,8 @@ extern I2C_HandleTypeDef hi2c3;
 extern SPI_HandleTypeDef hspi1;
 extern SPI_HandleTypeDef hspi2;
 extern TIM_HandleTypeDef htim1;
+extern TIM_HandleTypeDef htim15;
+extern TIM_HandleTypeDef htim17;
 extern TIM_HandleTypeDef htim3;
 extern TIM_HandleTypeDef htim5;
 extern TIM_HandleTypeDef htim7;
