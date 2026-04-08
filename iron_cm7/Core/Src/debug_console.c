@@ -1772,6 +1772,19 @@ static void Debug_FormatFaultFlags(uint32_t fault_flags, char *buffer, size_t bu
     }
   }
 
+  if ((fault_flags & STATION_FAULT_FAN_TACH) != 0U)
+  {
+    append_length = snprintf(buffer + written, buffer_size - written, "%sFAN_TACH", (written > 0U) ? "|" : "");
+    if (append_length > 0)
+    {
+      written += (size_t)append_length;
+      if (written >= buffer_size)
+      {
+        written = buffer_size - 1U;
+      }
+    }
+  }
+
   if ((fault_flags & STATION_FAULT_INJECTED) != 0U)
   {
     append_length = snprintf(buffer + written, buffer_size - written, "%sINJECTED", (written > 0U) ? "|" : "");

@@ -1,6 +1,7 @@
 #include "app.h"
 
 #include "calibration.h"
+#include "fan.h"
 #include "heater.h"
 #include "ina238.h"
 #include "main.h"
@@ -12,8 +13,12 @@
 
 enum
 {
-  STATION_TIP_OVERTEMP_LIMIT_CDEG = 4500U,
-  STATION_AMBIENT_OVERTEMP_LIMIT_CDEG = 800U,
+  STATION_TIP_OVERTEMP_LIMIT_CDEG = 4800U,
+  STATION_AMBIENT_OVERTEMP_LIMIT_CDEG = 600U,
+  STATION_FAN_TACH_TOLERANCE_PERCENT = 15U,
+  STATION_FAN_TACH_STARTUP_DELAY_MS = 1500U,
+  STATION_FAN_TACH_FAULT_DEBOUNCE_MS = 400U,
+  STATION_FAN_TACH_MIN_MONITORED_RPM = 600U,
   STATION_AMBIENT_SENSOR_FAULT_TIMEOUT_MS = 5000U,
   STATION_RUNSTATE_DEBOUNCE_MS = 500U,
   STATION_HEATUP_ENTER_BAND_CDEG = 90U,
@@ -26,6 +31,8 @@ enum
 static StationContext station_context;
 static uint32_t station_forced_fault_flags;
 static uint32_t station_ambient_sensor_fault_since_ms;
+static uint32_t station_fan_tach_monitor_since_ms;
+static uint32_t station_fan_tach_out_of_range_since_ms;
 static uint32_t station_pending_runstate_since_ms;
 static uint8_t station_simulated_docked;
 static StationState station_pending_state;
@@ -286,7 +293,7 @@ static uint32_t Station_ReadHardwareFaultInputs(void)
   return fault_flags;
 }
 
-static uint32_t Station_EvaluateDerivedFaults(const HeaterControlContext *heater, uint32_t now_ms)
+static uint32_t Station_EvaluateDerivedFaults(const HeaterControlContext *heater, const FanContext *fan, uint32_t now_ms)
 {
   uint32_t fault_flags = 0U;
 
@@ -297,7 +304,7 @@ static uint32_t Station_EvaluateDerivedFaults(const HeaterControlContext *heater
 
   if (heater->measurement_ready != 0U)
   {
-    if (heater->tip_temp_cdeg >= STATION_TIP_OVERTEMP_LIMIT_CDEG)
+    if (heater->tip_temp_cdeg > STATION_TIP_OVERTEMP_LIMIT_CDEG)
     {
       fault_flags |= STATION_FAULT_TIP_OVERTEMP;
     }
@@ -306,6 +313,50 @@ static uint32_t Station_EvaluateDerivedFaults(const HeaterControlContext *heater
     {
       fault_flags |= STATION_FAULT_AMBIENT_OVERTEMP;
     }
+  }
+
+  if ((fan != NULL) &&
+      (fan->enabled != 0U) &&
+      (fan->target_rpm >= STATION_FAN_TACH_MIN_MONITORED_RPM))
+  {
+    uint32_t expected_rpm = fan->target_rpm;
+    uint32_t tolerance_rpm;
+    uint32_t low_limit_rpm;
+    uint32_t high_limit_rpm;
+
+    if (station_fan_tach_monitor_since_ms == 0U)
+    {
+      station_fan_tach_monitor_since_ms = now_ms;
+      station_fan_tach_out_of_range_since_ms = 0U;
+    }
+
+    if ((now_ms - station_fan_tach_monitor_since_ms) >= STATION_FAN_TACH_STARTUP_DELAY_MS)
+    {
+      tolerance_rpm = (expected_rpm * STATION_FAN_TACH_TOLERANCE_PERCENT) / 100U;
+      low_limit_rpm = (expected_rpm > tolerance_rpm) ? (expected_rpm - tolerance_rpm) : 0U;
+      high_limit_rpm = expected_rpm + tolerance_rpm;
+
+      if (((uint32_t)fan->tach_rpm < low_limit_rpm) || ((uint32_t)fan->tach_rpm > high_limit_rpm))
+      {
+        if (station_fan_tach_out_of_range_since_ms == 0U)
+        {
+          station_fan_tach_out_of_range_since_ms = now_ms;
+        }
+        else if ((now_ms - station_fan_tach_out_of_range_since_ms) >= STATION_FAN_TACH_FAULT_DEBOUNCE_MS)
+        {
+          fault_flags |= STATION_FAULT_FAN_TACH;
+        }
+      }
+      else
+      {
+        station_fan_tach_out_of_range_since_ms = 0U;
+      }
+    }
+  }
+  else
+  {
+    station_fan_tach_monitor_since_ms = 0U;
+    station_fan_tach_out_of_range_since_ms = 0U;
   }
 
 #if !IRON_VIRTUAL_MCP9808
@@ -364,7 +415,7 @@ static uint32_t Station_EvaluateWarnings(const HeaterControlContext *heater)
   return warning_flags;
 }
 
-static void Station_UpdateFaultStatus(const HeaterControlContext *heater, uint32_t now_ms)
+static void Station_UpdateFaultStatus(const HeaterControlContext *heater, const FanContext *fan, uint32_t now_ms)
 {
   uint32_t all_fault_flags = Station_ReadHardwareFaultInputs();
   uint32_t active_fault_flags;
@@ -379,7 +430,7 @@ static void Station_UpdateFaultStatus(const HeaterControlContext *heater, uint32
     all_fault_flags &= ~(STATION_FAULT_BUCKBOOST | STATION_FAULT_OPAMP_PGOOD);
   }
 
-  all_fault_flags |= Station_EvaluateDerivedFaults(heater, now_ms);
+  all_fault_flags |= Station_EvaluateDerivedFaults(heater, fan, now_ms);
   all_fault_flags |= station_forced_fault_flags;
   active_fault_flags = Station_FilterCriticalFaults(all_fault_flags);
 
@@ -413,6 +464,8 @@ void Station_App_Init(void)
   station_context.standby_active = 0U;
   station_forced_fault_flags = 0U;
   station_ambient_sensor_fault_since_ms = 0U;
+  station_fan_tach_monitor_since_ms = 0U;
+  station_fan_tach_out_of_range_since_ms = 0U;
   station_pending_runstate_since_ms = 0U;
   station_simulated_docked = 0U;
   station_pending_state = STATION_STATE_BOOT;
@@ -445,7 +498,7 @@ void Station_App_Init(void)
   Station_UpdateControlTarget(heater);
   station_context.calibration_valid = heater->calibration_valid;
 
-  Station_UpdateFaultStatus(heater, 0U);
+  Station_UpdateFaultStatus(heater, Fan_GetContext(), 0U);
 
   if (station_context.fault_flags != 0U)
   {
@@ -461,6 +514,7 @@ void Station_App_Init(void)
 void Station_App_Tick(uint32_t now_ms)
 {
   const HeaterControlContext *heater;
+  uint8_t fault_active;
 
   if ((now_ms - station_context.last_tick_ms) < 10U)
   {
@@ -469,14 +523,33 @@ void Station_App_Tick(uint32_t now_ms)
 
   station_context.last_tick_ms = now_ms;
 
-  /* Evaluate safety-critical faults before any heater control update. */
-  Station_UpdateFaultStatus(Heater_Control_GetContext(), now_ms);
+  fault_active = ((station_context.state == STATION_STATE_FAULT) ||
+                  (station_context.fault_flags != 0U) ||
+                  (station_context.active_fault_flags != 0U)) ? 1U : 0U;
 
-  /* In FAULT state keep hard-safe outputs stable and skip heater sequencing. */
-  if ((station_context.state == STATION_STATE_FAULT) ||
-      (station_context.fault_flags != 0U) ||
-      (station_context.active_fault_flags != 0U))
+  if (fault_active != 0U)
   {
+    /* Keep sampling alive in fault mode while forcing all heater outputs off. */
+    Heater_Control_SetOutputInhibit(1U);
+    Heater_Control_Tick(now_ms);
+    heater = Heater_Control_GetContext();
+    station_context.calibration_valid = heater->calibration_valid;
+    Station_UpdateFaultStatus(heater, Fan_GetContext(), now_ms);
+
+    station_context.state = STATION_STATE_FAULT;
+    station_context.operating_mode = STATION_OPERATING_MODE_FAULT;
+    Station_SafeShutdown();
+    return;
+  }
+
+  Heater_Control_SetOutputInhibit(0U);
+
+  /* Evaluate safety-critical faults before allowing normal heater drive. */
+  Station_UpdateFaultStatus(Heater_Control_GetContext(), Fan_GetContext(), now_ms);
+
+  if ((station_context.fault_flags != 0U) || (station_context.active_fault_flags != 0U))
+  {
+    Heater_Control_SetOutputInhibit(1U);
     station_context.state = STATION_STATE_FAULT;
     station_context.operating_mode = STATION_OPERATING_MODE_FAULT;
     Station_SafeShutdown();
@@ -488,7 +561,7 @@ void Station_App_Tick(uint32_t now_ms)
   heater = Heater_Control_GetContext();
   Station_UpdateControlTarget(heater);
   station_context.calibration_valid = heater->calibration_valid;
-  Station_UpdateFaultStatus(heater, now_ms);
+  Station_UpdateFaultStatus(heater, Fan_GetContext(), now_ms);
 
   if (station_context.active_fault_flags != 0U)
   {
@@ -521,7 +594,7 @@ void Station_SafeShutdown(void)
 void Station_App_RequestFault(uint32_t fault_mask)
 {
   station_forced_fault_flags |= fault_mask;
-  Station_UpdateFaultStatus(Heater_Control_GetContext(), HAL_GetTick());
+  Station_UpdateFaultStatus(Heater_Control_GetContext(), Fan_GetContext(), HAL_GetTick());
 
   if (station_context.fault_flags != 0U)
   {
@@ -533,14 +606,14 @@ void Station_App_RequestFault(uint32_t fault_mask)
 void Station_App_ClearFault(uint32_t fault_mask)
 {
   station_forced_fault_flags &= ~fault_mask;
-  Station_UpdateFaultStatus(Heater_Control_GetContext(), HAL_GetTick());
+  Station_UpdateFaultStatus(Heater_Control_GetContext(), Fan_GetContext(), HAL_GetTick());
 }
 
 uint8_t Station_App_AcknowledgeFaults(uint32_t clearable_fault_mask)
 {
   clearable_fault_mask &= STATION_FAULT_ACK_MASK;
   station_forced_fault_flags &= ~clearable_fault_mask;
-  Station_UpdateFaultStatus(Heater_Control_GetContext(), HAL_GetTick());
+  Station_UpdateFaultStatus(Heater_Control_GetContext(), Fan_GetContext(), HAL_GetTick());
 
   if (station_context.active_fault_flags != 0U)
   {

@@ -74,17 +74,22 @@ static const char *Display_GetPrimaryFaultText(uint32_t fault_flags)
 
   if ((fault_flags & STATION_FAULT_TIP_OVERTEMP) != 0U)
   {
-    return "TIP_OVERTEMP";
+    return "TIP OVERHEAT";
   }
 
   if ((fault_flags & STATION_FAULT_AMBIENT_OVERTEMP) != 0U)
   {
-    return "AMBIENT_OT";
+    return "HOUSING HOT";
   }
 
   if ((fault_flags & STATION_FAULT_AMBIENT_SENSOR) != 0U)
   {
     return "AMBIENT_SENSOR";
+  }
+
+  if ((fault_flags & STATION_FAULT_FAN_TACH) != 0U)
+  {
+    return "FAN TACH";
   }
 
   if ((fault_flags & STATION_FAULT_INJECTED) != 0U)

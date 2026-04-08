@@ -54,6 +54,7 @@ typedef struct
   uint8_t calibration_valid;
   uint8_t ambient_sensor_ready;
   uint8_t external_sensor_ready;
+  uint8_t output_inhibit;
 } HeaterControlContext;
 
 void Heater_Control_Init(void);
@@ -61,6 +62,7 @@ void Heater_Control_Tick(uint32_t now_ms);
 void Heater_Control_SetTargetTempCdeg(uint16_t target_temp_cdeg);
 void Heater_Control_SetEffectiveTargetTempCdeg(uint16_t target_temp_cdeg);
 void Heater_Control_SetPwmPermille(uint16_t pwm_permille);
+void Heater_Control_SetOutputInhibit(uint8_t inhibit);
 void Heater_Control_ForceOff(void);
 void Heater_Simulation_Reset(void);
 void Heater_Simulation_SetAmbientTempCdeg(uint16_t ambient_temp_cdeg);

@@ -503,6 +503,7 @@ static uint8_t Heater_PerformMeasurementSequence(void)
 #if !IRON_VIRTUAL_INTERNAL_ADC
   uint8_t index;
 #endif
+  uint8_t heater_enable_after_measurement;
 
   HAL_GPIO_WritePin(HEATER_EN_GPIO_Port, HEATER_EN_Pin, HEATER_EN_INACTIVE_LEVEL);
   Heater_TimerWaitUs(HEATER_SWITCH_OFF_DELAY_US);
@@ -541,7 +542,10 @@ static uint8_t Heater_PerformMeasurementSequence(void)
   HAL_GPIO_WritePin(TIP_CLAMP_GPIO_Port, TIP_CLAMP_Pin, TIP_CLAMP_SAFE_LEVEL);
   Heater_TimerWaitUs(HEATER_RESTORE_DELAY_US);
 
-  HAL_GPIO_WritePin(HEATER_EN_GPIO_Port, HEATER_EN_Pin, HEATER_EN_ACTIVE_LEVEL);
+  heater_enable_after_measurement = ((heater_context.pwm_permille > 0U) && (heater_context.output_inhibit == 0U)) ? 1U : 0U;
+  HAL_GPIO_WritePin(HEATER_EN_GPIO_Port,
+                    HEATER_EN_Pin,
+                    (heater_enable_after_measurement != 0U) ? HEATER_EN_ACTIVE_LEVEL : HEATER_EN_INACTIVE_LEVEL);
 
   heater_context.filtered_raw = heater_context.latest_samples[HEATER_ADC_SAMPLE_COUNT - 1U];
   if (Heater_ReadAuxiliaryMeasurements() == 0U)
@@ -595,6 +599,7 @@ void Heater_Control_Init(void)
   heater_context.calibration_valid = 0U;
   heater_context.ambient_sensor_ready = 0U;
   heater_context.external_sensor_ready = 0U;
+  heater_context.output_inhibit = 0U;
 
   /* Phase 3: Initialize measurement metadata */
   heater_context.measurement.sequence_id = 0U;
@@ -671,6 +676,12 @@ void Heater_Control_Tick(uint32_t now_ms)
     return;
   }
 
+  if (heater_context.output_inhibit != 0U)
+  {
+    Heater_Control_SetPwmPermille(0U);
+    return;
+  }
+
 #if !(IRON_VIRTUAL_INTERNAL_ADC || IRON_VIRTUAL_AUX_ADC)
   requested_pwm_permille = Heater_ComputeControlPwmPermille();
   Heater_Control_SetPwmPermille(requested_pwm_permille);
@@ -694,6 +705,11 @@ void Heater_Control_SetEffectiveTargetTempCdeg(uint16_t target_temp_cdeg)
 
 void Heater_Control_SetPwmPermille(uint16_t pwm_permille)
 {
+  if (heater_context.output_inhibit != 0U)
+  {
+    pwm_permille = 0U;
+  }
+
   if (pwm_permille > HEATER_PWM_MAX_PERMILLE)
   {
     pwm_permille = HEATER_PWM_MAX_PERMILLE;
@@ -702,6 +718,18 @@ void Heater_Control_SetPwmPermille(uint16_t pwm_permille)
   heater_context.pwm_permille = pwm_permille;
   Heater_UpdateBuckBoostReference(pwm_permille);
   Heater_ApplyPwm(pwm_permille);
+}
+
+void Heater_Control_SetOutputInhibit(uint8_t inhibit)
+{
+  heater_context.output_inhibit = (inhibit != 0U) ? 1U : 0U;
+
+  if (heater_context.output_inhibit != 0U)
+  {
+    Heater_Control_SetPwmPermille(0U);
+    HAL_GPIO_WritePin(HEATER_EN_GPIO_Port, HEATER_EN_Pin, HEATER_EN_INACTIVE_LEVEL);
+    HAL_GPIO_WritePin(TIP_CLAMP_GPIO_Port, TIP_CLAMP_Pin, TIP_CLAMP_SAFE_LEVEL);
+  }
 }
 
 void Heater_Control_ForceOff(void)
