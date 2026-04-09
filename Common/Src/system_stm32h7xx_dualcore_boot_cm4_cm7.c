@@ -250,6 +250,15 @@ void SystemInit (void)
   /* Disable all interrupts */
   RCC->CIER = 0x00000000;
 
+  /* Force FAN PWM (PE5) low before main/HAL_Init to avoid startup fan spin-up. */
+  RCC->AHB4ENR |= RCC_AHB4ENR_GPIOEEN;
+  (void)RCC->AHB4ENR;
+  GPIOE->BSRR = (1UL << (5U + 16U));
+  GPIOE->MODER = (GPIOE->MODER & ~(3UL << (5U * 2U))) | (1UL << (5U * 2U));
+  GPIOE->OTYPER &= ~(1UL << 5U);
+  GPIOE->OSPEEDR &= ~(3UL << (5U * 2U));
+  GPIOE->PUPDR = (GPIOE->PUPDR & ~(3UL << (5U * 2U))) | (2UL << (5U * 2U));
+
   /* Enable CortexM7 HSEM EXTI line (line 78)*/
   EXTI_D2->EMR3 |= 0x4000UL;
 

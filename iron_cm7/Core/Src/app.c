@@ -15,7 +15,7 @@ enum
 {
   STATION_TIP_OVERTEMP_LIMIT_CDEG = 4800U,
   STATION_AMBIENT_OVERTEMP_LIMIT_CDEG = 600U,
-  STATION_FAN_TACH_TOLERANCE_PERCENT = 15U,
+  STATION_FAN_TACH_TOLERANCE_PERCENT = 30U,
   STATION_FAN_TACH_STARTUP_DELAY_MS = 1500U,
   STATION_FAN_TACH_FAULT_DEBOUNCE_MS = 400U,
   STATION_FAN_TACH_MIN_MONITORED_RPM = 600U,
@@ -33,6 +33,7 @@ static uint32_t station_forced_fault_flags;
 static uint32_t station_ambient_sensor_fault_since_ms;
 static uint32_t station_fan_tach_monitor_since_ms;
 static uint32_t station_fan_tach_out_of_range_since_ms;
+static uint16_t station_fan_last_requested_pwm_permille;
 static uint32_t station_pending_runstate_since_ms;
 static uint8_t station_simulated_docked;
 static StationState station_pending_state;
@@ -324,6 +325,13 @@ static uint32_t Station_EvaluateDerivedFaults(const HeaterControlContext *heater
     uint32_t low_limit_rpm;
     uint32_t high_limit_rpm;
 
+    if (station_fan_last_requested_pwm_permille != fan->requested_pwm_permille)
+    {
+      station_fan_last_requested_pwm_permille = fan->requested_pwm_permille;
+      station_fan_tach_monitor_since_ms = now_ms;
+      station_fan_tach_out_of_range_since_ms = 0U;
+    }
+
     if (station_fan_tach_monitor_since_ms == 0U)
     {
       station_fan_tach_monitor_since_ms = now_ms;
@@ -357,6 +365,7 @@ static uint32_t Station_EvaluateDerivedFaults(const HeaterControlContext *heater
   {
     station_fan_tach_monitor_since_ms = 0U;
     station_fan_tach_out_of_range_since_ms = 0U;
+    station_fan_last_requested_pwm_permille = 0xFFFFU;
   }
 
 #if !IRON_VIRTUAL_MCP9808
@@ -466,6 +475,7 @@ void Station_App_Init(void)
   station_ambient_sensor_fault_since_ms = 0U;
   station_fan_tach_monitor_since_ms = 0U;
   station_fan_tach_out_of_range_since_ms = 0U;
+  station_fan_last_requested_pwm_permille = 0xFFFFU;
   station_pending_runstate_since_ms = 0U;
   station_simulated_docked = 0U;
   station_pending_state = STATION_STATE_BOOT;

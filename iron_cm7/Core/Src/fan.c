@@ -7,15 +7,19 @@
 enum
 {
   FAN_PWM_MAX_PERMILLE = 1000U,
-  FAN_TEST_ON_AMBIENT_CDEG = 400U,
-  FAN_TEST_FIXED_PWM_PERMILLE = 500U,
+  FAN_AMBIENT_STAGE1_CDEG = 300U,
+  FAN_AMBIENT_STAGE2_CDEG = 400U,
+  FAN_AMBIENT_STAGE3_CDEG = 500U,
+  FAN_STAGE1_PWM_PERMILLE = 300U,
+  FAN_STAGE2_PWM_PERMILLE = 500U,
+  FAN_STAGE3_PWM_PERMILLE = 1000U,
   FAN_RAMP_STEP_PERMILLE = 60U,
-  FAN_MAX_RPM = 10000U,
+  FAN_MAX_RPM = 15600U,
   FAN_TACHO_PULSES_PER_REV = 2U,
   FAN_TACHO_MIN_PERIOD_US = 1500U,
   FAN_TACHO_MIN_ACTIVE_PWM_PERMILLE = 200U,
   FAN_TACHO_MIN_ALLOWED_RPM = 300U,
-  FAN_TACHO_TOLERANCE_PERCENT = 25U,
+  FAN_TACHO_TOLERANCE_PERCENT = 30U,
   FAN_TACH_TIMER_HZ = 1000000U,
   FAN_TACH_CALIBRATION_PPM_DEFAULT = 1003200U, /* +0.32%: MCU clock runs 0.32% fast, corrects tach reading */
   FAN_TACH_CALIBRATION_PPM_MIN = 950000U,
@@ -231,9 +235,19 @@ void Fan_Tick(uint32_t now_ms, const StationContext *station, const HeaterContro
   fan_context.last_tick_ms = now_ms;
   fan_context.cooling_request = 0U;
 
-  if ((uint16_t)heater->ambient_temp_cdeg >= FAN_TEST_ON_AMBIENT_CDEG)
+  if ((uint16_t)heater->ambient_temp_cdeg >= FAN_AMBIENT_STAGE3_CDEG)
   {
-    requested_pwm_permille = FAN_TEST_FIXED_PWM_PERMILLE;
+    requested_pwm_permille = FAN_STAGE3_PWM_PERMILLE;
+    fan_context.cooling_request = 1U;
+  }
+  else if ((uint16_t)heater->ambient_temp_cdeg >= FAN_AMBIENT_STAGE2_CDEG)
+  {
+    requested_pwm_permille = FAN_STAGE2_PWM_PERMILLE;
+    fan_context.cooling_request = 1U;
+  }
+  else if ((uint16_t)heater->ambient_temp_cdeg >= FAN_AMBIENT_STAGE1_CDEG)
+  {
+    requested_pwm_permille = FAN_STAGE1_PWM_PERMILLE;
     fan_context.cooling_request = 1U;
   }
 

@@ -272,6 +272,7 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim)
   {
     __HAL_RCC_GPIOE_CLK_ENABLE();
     GPIO_InitStruct.Pin = FAN_PWM_Pin;
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
     GPIO_InitStruct.Alternate = GPIO_AF4_TIM15;
     HAL_GPIO_Init(FAN_PWM_GPIO_Port, &GPIO_InitStruct);
   }

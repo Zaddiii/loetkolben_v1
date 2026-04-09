@@ -634,7 +634,7 @@ static void Debug_ProcessConsoleCommand(const char *command)
   {
     uint16_t ambient_cdeg = Heater_Test_GetAmbientTempCdeg();
 
-    Debug_Log("ambient=%u.%uC (fan test threshold=40.0C -> 50%% pwm)\r\n",
+    Debug_Log("ambient=%u.%uC (fan stages: 30.0C->30%%, 40.0C->50%%, 50.0C->100%% pwm)\r\n",
               (unsigned int)(ambient_cdeg / 10U),
               (unsigned int)(ambient_cdeg % 10U));
     Debug_PrintConsolePrompt();
